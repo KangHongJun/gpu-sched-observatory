@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -57,9 +59,25 @@ def test_build_command_launched_exact():
     argv = build_command(NSYS, 5, Path("/o/c"), target=["python", "-m", "w"])
     assert argv == [
         NSYS, "profile", "--gpuctxsw=true", "--sample=none", "--cpuctxsw=none",
-        "--trace=cuda", "--duration=5", "--force-overwrite=true", "-o", "/o/c",
+        "--trace=cuda", "--kill=none", "--duration=5", "--force-overwrite=true", "-o", "/o/c",
         "python", "-m", "w",
     ]
+
+
+def test_build_command_launched_end_target_kills_with_sigterm():
+    argv = build_command(NSYS, 5, Path("/o/c"), target=["w"], end_target=True)
+    assert "--kill=sigterm" in argv and "--kill=none" not in argv
+
+
+def test_build_command_global_unchanged_and_end_target_rejected():
+    assert build_command(NSYS, 10, Path("/o/c")) == [
+        NSYS, "profile", "--gpuctxsw=true", "--sample=none", "--cpuctxsw=none",
+        "--duration=10", "--force-overwrite=true", "-o", "/o/c", "sleep", "10",
+    ]
+    with pytest.raises(ValueError):
+        build_command(NSYS, 5, Path("/o/c"), end_target=True)
+    with pytest.raises(ValueError):
+        capture(5, Path("/nonexistent"), caps(), run=fake_run(), end_target=True)
 
 
 def test_build_command_gpuctxsw_false_drops_only_that_option():
@@ -283,34 +301,122 @@ def test_group_runner_returns_completed_process():
     assert (r.returncode, r.stdout.strip(), r.stderr.strip()) == (4, "out", "err")
 
 
-# --- launched target outliving the duration ------------------------------
-def test_launched_target_stopped_by_nsys_is_success_with_warning(tmp_path):
-    """nsys가 --duration 끝에 대상을 SIGTERM으로 끝내면 종료 코드 143이지만 보고서는 정상이다."""
-    run = fake_run(
-        results=[(143, "Generated: l.nsys-rep", ""), (0, "", "")],
-        on_call=touch_outputs(tmp_path, "l"),
+# --- exit 143 / end_target ----------------------------------------------
+def clock(*values):
+    it = iter(values)
+    return lambda: next(it)
+
+
+def run143(tmp_path, rep_bytes=b"rep", rc=143):
+    def on_call(argv, i):
+        if argv[1] == "profile":
+            (tmp_path / "l.nsys-rep").write_bytes(rep_bytes)
+        else:
+            (tmp_path / "l.sqlite").write_bytes(b"s")
+
+    return fake_run(results=[(rc, "Generated", ""), (0, "", "")], on_call=on_call)
+
+
+def cap143(tmp_path, run, *, end_target=True, target=("w",), times=(0.0, 6.0, 7.0)):
+    return capture(
+        5, tmp_path, caps(root=True), run=run, name="l",
+        target=list(target) if target else None, end_target=end_target,
+        monotonic=clock(*times),
     )
-    res = capture(5, tmp_path, caps(root=True), run=run, name="l", target=["w"])
-    assert res.mode == "launched"
-    assert len(run.argvs) == 2
-    assert any("대상" in w and "종료" in w for w in res.warnings)
 
 
-def test_exit_143_in_global_mode_is_still_an_error(tmp_path):
-    run = fake_run(results=[(143, "", "x")], on_call=touch_outputs(tmp_path))
+def test_143_accepted_when_end_target_report_nonempty_and_full_duration(tmp_path):
+    res = cap143(tmp_path, run143(tmp_path))
+    assert res.target_terminated is True
+    assert any("종료" in w and "end_target" in w for w in res.warnings)
+
+
+def test_143_zero_byte_report_is_error(tmp_path):
     with pytest.raises(CaptureError, match="143"):
+        cap143(tmp_path, run143(tmp_path, rep_bytes=b""))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_143_too_early_is_error(tmp_path):
+    with pytest.raises(CaptureError, match="143"):
+        cap143(tmp_path, run143(tmp_path), times=(0.0, 2.0, 3.0))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_143_without_end_target_is_error(tmp_path):
+    with pytest.raises(CaptureError, match="143"):
+        cap143(tmp_path, run143(tmp_path), end_target=False)
+
+
+def test_143_in_global_mode_is_error(tmp_path):
+    with pytest.raises(CaptureError, match="143"):
+        cap143(tmp_path, run143(tmp_path), target=None, end_target=False)
+
+
+def test_137_is_error_even_with_end_target(tmp_path):
+    with pytest.raises(CaptureError, match="137"):
+        cap143(tmp_path, run143(tmp_path, rc=137))
+
+
+def test_zero_exit_with_zero_byte_report_is_error(tmp_path):
+    run = fake_run(on_call=lambda argv, i: (tmp_path / "capture.nsys-rep").write_bytes(b""))
+    with pytest.raises(CaptureError, match="nsys-rep"):
         capture(5, tmp_path, caps(), run=run)
     assert list(tmp_path.iterdir()) == []
 
 
-def test_launched_exit_143_without_rep_is_an_error(tmp_path):
-    run = fake_run(results=[(143, "", "x")])
-    with pytest.raises(CaptureError, match="143"):
-        capture(5, tmp_path, caps(), run=run, target=["w"])
+def test_target_terminated_false_on_normal_captures(tmp_path):
+    run = fake_run(on_call=touch_outputs(tmp_path))
+    assert capture(5, tmp_path, caps(), run=run).target_terminated is False
+    run = fake_run(on_call=touch_outputs(tmp_path, "b"))
+    res = capture(5, tmp_path, caps(), run=run, target=["w"], name="b")
+    assert res.target_terminated is False
+    assert "--kill=none" in run.argvs[0]
+    assert any("먼저 종료" in w for w in res.warnings)
 
 
-def test_launched_other_nonzero_exit_is_an_error(tmp_path):
-    run = fake_run(results=[(1, "", "bad")], on_call=touch_outputs(tmp_path))
-    with pytest.raises(CaptureError, match="bad"):
-        capture(5, tmp_path, caps(), run=run, target=["w"])
-    assert list(tmp_path.iterdir()) == []
+# --- pre-existing same-name outputs ---------------------------------------
+def test_failure_keeps_untouched_preexisting_capture(tmp_path):
+    old = tmp_path / "capture.nsys-rep"
+    old.write_bytes(b"old-report")
+    run = fake_run(results=[(2, "", "bad")])
+    with pytest.raises(CaptureError):
+        capture(5, tmp_path, caps(), run=run)
+    assert old.read_bytes() == b"old-report"
+
+
+def test_failure_removes_rewritten_preexisting_capture(tmp_path):
+    old = tmp_path / "capture.nsys-rep"
+    old.write_bytes(b"old-report")
+    run = fake_run(
+        results=[(2, "", "bad")],
+        on_call=lambda a, i: old.write_bytes(b"partial-new-contents"),
+    )
+    with pytest.raises(CaptureError):
+        capture(5, tmp_path, caps(), run=run)
+    assert not old.exists()
+
+
+def test_stale_report_is_not_mistaken_for_new_output(tmp_path):
+    (tmp_path / "capture.nsys-rep").write_bytes(b"old-report")
+    with pytest.raises(CaptureError, match="nsys-rep"):
+        capture(5, tmp_path, caps(), run=fake_run())
+
+
+# --- default runner: survivors and pipes ----------------------------------
+def test_default_runner_does_not_wait_for_or_signal_surviving_background_process(tmp_path):
+    pidfile = tmp_path / "pid"
+    script = f"sleep 30 & echo $! > {pidfile}; echo started"
+    t0 = time.monotonic()
+    r = nsys_capture._run_in_group(
+        ["sh", "-c", script], capture_output=True, text=True, timeout=10, env=None
+    )
+    elapsed = time.monotonic() - t0
+    pid = int(pidfile.read_text())
+    try:
+        assert elapsed < 2
+        assert "started" in r.stdout
+        assert alive(pid)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
