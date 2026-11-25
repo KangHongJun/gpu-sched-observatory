@@ -1,3 +1,5 @@
+import pytest
+
 from gso.record import Quality, Record, Scope, unsupported
 from gso.tui.widgets import (
     ProcessRow,
@@ -120,7 +122,6 @@ def test_formatters():
     assert fmt_power(None) == "N/A"
 
 
-import pytest
 
 
 @pytest.mark.parametrize("v", [float("nan"), float("inf"), float("-inf")])

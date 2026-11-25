@@ -139,3 +139,21 @@ def test_read_from_reports_overwritten_records():
     recs, nxt, lost = buf.read_from(0)
     assert [r.metric for r in recs] == ["m2", "m3", "m4"]
     assert nxt == 5 and lost == 2
+
+
+def test_read_from_clamps_cursor_ahead_of_sequence():
+    buf = RingBuffer(5)
+    for i in range(3):
+        buf.push(rec(i))
+    assert buf.read_from(99) == ([], 3, 0)  # never moves the sequence backwards
+    buf.push(rec(3, "new"))
+    recs, nxt, lost = buf.read_from(3)
+    assert [r.metric for r in recs] == ["new"] and nxt == 4 and lost == 0
+
+
+def test_read_from_negative_cursor_does_not_inflate_lost():
+    buf = RingBuffer(3)
+    for i in range(5):
+        buf.push(rec(i, f"m{i}"))
+    recs, nxt, lost = buf.read_from(-10)
+    assert [r.metric for r in recs] == ["m2", "m3", "m4"] and nxt == 5 and lost == 2

@@ -8,8 +8,8 @@ from gso.buffer import RingBuffer
 from gso.export import (
     CSV_COLUMNS,
     CsvStream,
+    Drainer,
     JsonlStream,
-    drain_to,
     read_jsonl,
     write_csv,
     write_jsonl,
@@ -140,38 +140,103 @@ def test_streams_append_and_flush(tmp_path):
     sj, sc = JsonlStream(j), CsvStream(c)
     assert sj.write(SAMPLE[:2]) == 2 and sc.write(SAMPLE[:2]) == 2
     # flushed without close: another reader already sees the data
-    assert read_jsonl(j) == SAMPLE[:2]
-    assert len(read_csv_rows(c)) == 2
+    assert read_jsonl(sj.partial_path) == SAMPLE[:2]
+    assert len(read_csv_rows(sc.partial_path)) == 2
     sj.write(SAMPLE[2:])
     sc.write(SAMPLE[2:])
-    sj.close()
-    sc.close()
-    sj.close()  # idempotent
+    sj.commit()
+    sc.commit()
+    sj.commit()  # idempotent
     assert read_jsonl(j) == SAMPLE
     assert [r["metric"] for r in read_csv_rows(c)] == [r.metric for r in SAMPLE]
     assert sj.count == 4 and sc.count == 4
 
 
-def test_stream_header_only_csv_when_nothing_written(tmp_path):
-    c = tmp_path / "s.csv"
-    CsvStream(c).close()
-    assert c.read_text(encoding="utf-8") == ",".join(CSV_COLUMNS) + "\n"
+def test_stream_writes_to_partial_until_commit(tmp_path):
+    p = tmp_path / "s.jsonl"
+    p.write_text("OLD\n", encoding="utf-8")
+    s = JsonlStream(p)
+    s.write(SAMPLE[:2])
+    assert s.partial_path == tmp_path / "s.jsonl.partial"
+    assert p.read_text(encoding="utf-8") == "OLD\n"
+    assert len(read_jsonl(s.partial_path)) == 2
+    s.commit()
+    assert read_jsonl(p) == SAMPLE[:2]
+    assert not s.partial_path.exists()
+
+
+def test_stream_stale_partial_is_overwritten(tmp_path):
+    (tmp_path / "s.csv.partial").write_text("garbage\n", encoding="utf-8")
+    s = CsvStream(tmp_path / "s.csv")
+    s.write(SAMPLE[:1])
+    s.commit()
+    assert len(read_csv_rows(tmp_path / "s.csv")) == 1
+
+
+@pytest.mark.parametrize("cls,name", [(JsonlStream, "s.jsonl"), (CsvStream, "s.csv")])
+def test_empty_stream_commit_keeps_target_and_removes_partial(tmp_path, cls, name):
+    p = tmp_path / name
+    p.write_text("OLD\n", encoding="utf-8")
+    s = cls(p)
+    s.commit()
+    assert p.read_text(encoding="utf-8") == "OLD\n"
+    assert os.listdir(tmp_path) == [name]
+
+
+def test_stream_close_keeps_data_in_partial_and_target_untouched(tmp_path):
+    p = tmp_path / "s.jsonl"
+    p.write_text("OLD\n", encoding="utf-8")
+    s = JsonlStream(p)
+    s.write(SAMPLE[:2])
+    s.close()
+    assert p.read_text(encoding="utf-8") == "OLD\n"
+    assert read_jsonl(s.partial_path) == SAMPLE[:2]
+
+
+def test_stream_dropped_without_close_leaves_target_and_flushed_partial(tmp_path):
+    p = tmp_path / "s.jsonl"
+    p.write_text("OLD\n", encoding="utf-8")
+    s = JsonlStream(p)
+    s.write(SAMPLE[:3])
+    partial = s.partial_path
+    del s
+    assert p.read_text(encoding="utf-8") == "OLD\n"
+    assert read_jsonl(partial) == SAMPLE[:3]
+
+
+def test_empty_stream_close_removes_partial(tmp_path):
+    s = JsonlStream(tmp_path / "s.jsonl")
+    s.close()
+    assert os.listdir(tmp_path) == []
 
 
 class ListSink:
-    def __init__(self):
+    """In-memory sink; ``fail_at`` (1-based record number) raises ``exc`` once, after k-1 writes."""
+
+    def __init__(self, fail_at=None, exc=None):
         self.items = []
+        self.fail_at = fail_at
+        self.exc = exc
 
     def write(self, records):
-        records = list(records)
-        self.items.extend(records)
-        return len(records)
+        n = 0
+        for r in records:
+            if self.fail_at is not None and len(self.items) + 1 == self.fail_at:
+                self.fail_at = None
+                raise self.exc
+            self.items.append(r)
+            n += 1
+        return n
+
+
+def mkseq(n, ts=10, prefix="m"):
+    return [rec(ts, metric=f"{prefix}{i}") for i in range(n)]
 
 
 def test_drain_cursor_exactly_once_with_shared_timestamps():
     buf = RingBuffer(1000)
     sink = ListSink()
-    cursor = 0
+    d = Drainer(buf, sink)
     expected = []
     seq = 0
     for batch_ts in (10, 10, 10, 11, 11, 10, 12):  # repeated and even out-of-order timestamps
@@ -180,36 +245,30 @@ def test_drain_cursor_exactly_once_with_shared_timestamps():
             seq += 1
             buf.push(r)
             expected.append(r)
-        cursor, lost = drain_to(buf, sink, cursor)
-        assert lost == 0
-    # nothing new: no duplicates
-    cursor, lost = drain_to(buf, sink, cursor)
-    assert sink.items == expected and len(sink.items) == 21
+        d.drain()
+    d.drain()  # nothing new: no duplicates
+    assert sink.items == expected and len(sink.items) == 21 and d.lost == 0
 
 
 def test_drain_cursor_two_interleaving_producers():
     buf = RingBuffer(100_000)
     sink = ListSink()
-    stop = threading.Event()
+    d = Drainer(buf, sink)
     pushed = {"a": [], "b": []}
 
     def producer(tag):
-        i = 0
-        while not stop.is_set() and i < 3000:
+        for i in range(3000):
             r = rec(i // 5, metric=f"{tag}{i}")  # five records share each timestamp
             buf.push(r)
             pushed[tag].append(r)
-            i += 1
 
     ts = [threading.Thread(target=producer, args=(t,)) for t in "ab"]
     for t in ts:
         t.start()
-    cursor = 0
     while any(t.is_alive() for t in ts):
-        cursor, lost = drain_to(buf, sink, cursor)
-        assert lost == 0
-    cursor, lost = drain_to(buf, sink, cursor)
-    assert lost == 0
+        d.drain()
+    d.drain()
+    assert d.lost == 0
     assert len(sink.items) == 6000 == len({r.metric for r in sink.items})
     for tag in "ab":  # per-producer order preserved
         assert [r for r in sink.items if r.metric.startswith(tag)] == pushed[tag]
@@ -218,12 +277,44 @@ def test_drain_cursor_two_interleaving_producers():
 def test_drain_reports_dropped_records():
     buf = RingBuffer(4)
     sink = ListSink()
-    for i in range(3):
-        buf.push(rec(i, f"m{i}"))
-    cursor, lost = drain_to(buf, sink, 0)
-    assert lost == 0
-    for i in range(3, 12):  # 9 pushes, capacity 4: 5 records overwritten unread
-        buf.push(rec(i, f"m{i}"))
-    cursor, lost = drain_to(buf, sink, cursor)
-    assert lost == 5
-    assert [r.metric for r in sink.items] == ["m0", "m1", "m2", "m8", "m9", "m10", "m11"]
+    d = Drainer(buf, sink)
+    for r in mkseq(3):
+        buf.push(r)
+    d.drain()
+    assert d.lost == 0
+    for r in mkseq(9, prefix="n"):  # 9 pushes, capacity 4: 5 overwritten unread
+        buf.push(r)
+    d.drain()
+    assert d.lost == 5
+    assert [r.metric for r in sink.items] == ["m0", "m1", "m2", "n5", "n6", "n7", "n8"]
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt(), OSError(28, "No space left on device")])
+def test_drain_interrupted_mid_write_is_exactly_once(exc):
+    buf = RingBuffer(100)
+    sink = ListSink(fail_at=4, exc=exc)
+    d = Drainer(buf, sink)
+    recs = mkseq(10)
+    for r in recs:
+        buf.push(r)
+    with pytest.raises(type(exc)):
+        d.drain()
+    assert len(sink.items) == 3
+    d.drain()  # the handler's final drain
+    d.drain()
+    assert sink.items == recs and d.lost == 0
+
+
+def test_drain_interrupted_after_overwrite_counts_lost_once():
+    buf = RingBuffer(6)
+    sink = ListSink(fail_at=3, exc=KeyboardInterrupt())
+    d = Drainer(buf, sink)
+    recs = mkseq(10)  # 4 overwritten before the first read
+    for r in recs:
+        buf.push(r)
+    with pytest.raises(KeyboardInterrupt):
+        d.drain()
+    assert d.lost == 4
+    d.drain()
+    assert d.lost == 4  # not doubled
+    assert sink.items == recs[4:]

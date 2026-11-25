@@ -83,6 +83,14 @@ class GsoApp(App):
         self._max_age_ns = int(3 * interval_s * _S)
         self._notice: tuple[str, int] | None = None
 
+    @property
+    def buffer(self) -> RingBuffer:
+        return self._buffer
+
+    @property
+    def collector(self):
+        return self._collector
+
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
         yield Static("", id="header", markup=False)

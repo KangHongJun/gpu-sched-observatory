@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from itertools import islice
 
 from gso.record import Record
 
@@ -47,9 +48,10 @@ class RingBuffer:
         repeated (a timestamp cursor cannot promise that).
         """
         with self._lock:
+            seq = min(max(seq, 0), self._total)
             first = self._total - len(self._items)  # sequence number of the oldest kept record
             start = max(seq, first)
-            items = list(self._items)[start - first:]
+            items = list(islice(self._items, start - first, None))
             return items, self._total, start - seq
 
     @property

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import gso.collector
+import gso.export
 from gso import cli
 from gso.buffer import RingBuffer
 from gso.capability import Capabilities, DcgmStatus, GpuInfo
@@ -111,6 +112,7 @@ def run_main(argv, ft=None):
         ["--headless", "--duration", "5", "--export", "{p}/nodir/o.jsonl"],  # parent missing
         ["--export", "{p}/o.parquet"],                                  # interactive, bad ext
         ["--interval", "0.05"],
+        ["--headless", "--duration", "5", "--export", "{p}"],  # target is a directory
     ],
 )
 def test_live_argument_validation(argv, tmp_path, fake_collector):
@@ -190,7 +192,7 @@ def test_headless_zero_records_exits_1_with_reason(tmp_path, fake_collector, cap
     assert any("wrote 0 records" in ln for ln in err)
     assert any("NVMLError: no driver" in ln for ln in err)
     assert any("host engine down" in ln for ln in err)
-    assert out.exists()  # a valid empty file
+    assert not out.exists() and list(tmp_path.iterdir()) == []  # nothing to commit
 
 
 def test_headless_status_errors_printed_each_line_even_with_records(tmp_path, fake_collector, capsys):
@@ -271,8 +273,8 @@ def test_headless_does_not_import_textual():
 
 class FakeApp:
     def __init__(self, buffer, collector, run):
-        self._buffer = buffer
-        self._collector = collector
+        self.buffer = buffer
+        self.collector = collector
         self.run = run
 
 
@@ -311,3 +313,160 @@ def test_interactive_run_failure_still_stops_collector(monkeypatch):
     with pytest.raises(RuntimeError):
         cli.main(["live", "--gpu", "1"])
     assert col.stops == 1
+
+
+# -- fix round 1: .partial streaming, exactly-once drain, I/O errors -----------------
+
+HEADLESS = ["live", "--gpu", "1", "--headless", "--duration", "3", "--export"]
+
+
+def test_headless_normal_run_replaces_old_target_no_partial(tmp_path, fake_collector):
+    out = tmp_path / "o.jsonl"
+    out.write_text("OLD\n", encoding="utf-8")
+    fake_collector.records_on_start = [mk(1, "a")]
+    code, _ = run_main([*HEADLESS, str(out)])
+    assert code == 0
+    assert [r.metric for r in read_jsonl(out)] == ["a"]
+    assert [p.name for p in tmp_path.iterdir()] == ["o.jsonl"]
+
+
+def test_headless_failure_before_any_record_leaves_target_alone(tmp_path, fake_collector):
+    out = tmp_path / "o.jsonl"
+    out.write_text("OLD\n", encoding="utf-8")
+
+    def on_sleep(n):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        run_main([*HEADLESS, str(out)], FakeTime(on_sleep))
+    assert out.read_text(encoding="utf-8") == "OLD\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["o.jsonl"]
+
+
+def test_headless_interrupt_commits_collected_records(tmp_path, fake_collector):
+    out = tmp_path / "o.jsonl"
+    out.write_text("OLD\n", encoding="utf-8")
+    fake_collector.records_on_start = [mk(1, "a"), mk(1, "b")]
+
+    def on_sleep(n):
+        raise KeyboardInterrupt
+
+    code, _ = run_main([*HEADLESS, str(out)], FakeTime(on_sleep))
+    assert code == 130
+    assert [r.metric for r in read_jsonl(out)] == ["a", "b"]
+    assert [p.name for p in tmp_path.iterdir()] == ["o.jsonl"]
+
+
+def test_headless_zero_records_keeps_existing_target(tmp_path, fake_collector):
+    out = tmp_path / "o.jsonl"
+    out.write_text("OLD\n", encoding="utf-8")
+    code, _ = run_main([*HEADLESS, str(out)])
+    assert code == 1
+    assert out.read_text(encoding="utf-8") == "OLD\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["o.jsonl"]
+
+
+def test_headless_stream_is_opened_before_detect(tmp_path, monkeypatch, fake_collector):
+    order = []
+    real_open = gso.export.open_stream
+    monkeypatch.setattr(gso.export, "open_stream", lambda p: (order.append("open"), real_open(p))[1])
+    monkeypatch.setattr(cli, "detect", lambda **kw: (order.append("detect"), caps())[1])
+    run_main([*HEADLESS, str(tmp_path / "o.jsonl")])
+    assert order == ["open", "detect"]
+
+
+def test_headless_ctrl_c_during_detect_exits_130(tmp_path, monkeypatch, fake_collector, capsys):
+    def interrupted(**kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "detect", interrupted)
+    out = tmp_path / "o.jsonl"
+    out.write_text("OLD\n", encoding="utf-8")
+    code, _ = run_main([*HEADLESS, str(out)])
+    assert code == 130
+    assert out.read_text(encoding="utf-8") == "OLD\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["o.jsonl"]
+    assert fake_collector.made == []
+
+
+@pytest.mark.skipif(hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_unwritable_parent_directory_rejected(tmp_path, fake_collector):
+    d = tmp_path / "ro"
+    d.mkdir()
+    d.chmod(0o555)
+    try:
+        with pytest.raises(SystemExit) as e:
+            run_main([*HEADLESS, str(d / "o.jsonl")])
+        assert e.value.code == 2
+        assert fake_collector.made == []
+    finally:
+        d.chmod(0o755)
+
+
+class FlakyStream(gso.export.JsonlStream):
+    """Raises ``exc`` when asked to write record number ``fail_at`` (once unless ``always``)."""
+
+    fail_at = 0
+    exc: BaseException = KeyboardInterrupt()
+    always = False
+
+    def write(self, records):
+        out = 0
+        for r in records:
+            if self.count + 1 == type(self).fail_at:
+                if not type(self).always:
+                    type(self).fail_at = 0
+                raise type(self).exc
+            out += super().write([r])
+        return out
+
+
+def test_headless_interrupt_inside_drain_writes_each_record_once(tmp_path, monkeypatch, fake_collector):
+    FlakyStream.fail_at, FlakyStream.exc, FlakyStream.always = 3, KeyboardInterrupt(), False
+    monkeypatch.setattr(gso.export, "open_stream", FlakyStream)
+    fake_collector.records_on_start = [mk(i, f"r{i}") for i in range(8)]
+    out = tmp_path / "o.jsonl"
+    code, _ = run_main([*HEADLESS, str(out)])
+    assert code == 130
+    assert [r.metric for r in read_jsonl(out)] == [f"r{i}" for i in range(8)]
+
+
+def test_headless_io_error_exits_3_and_keeps_partial(tmp_path, monkeypatch, fake_collector, capsys):
+    FlakyStream.fail_at = 3
+    FlakyStream.exc = OSError(28, "No space left on device")
+    FlakyStream.always = True
+    monkeypatch.setattr(gso.export, "open_stream", FlakyStream)
+    fake_collector.records_on_start = [mk(i, f"r{i}") for i in range(8)]
+    out = tmp_path / "o.jsonl"
+    out.write_text("OLD\n", encoding="utf-8")
+    code, _ = run_main([*HEADLESS, str(out)])
+    assert code == 3
+    assert fake_collector.made[0].stops == 1
+    assert out.read_text(encoding="utf-8") == "OLD\n"
+    partial = tmp_path / "o.jsonl.partial"
+    assert [r.metric for r in read_jsonl(partial)] == ["r0", "r1"]
+    err = capsys.readouterr().err.splitlines()
+    assert "wrote 2 records" in err[0] and str(partial) in err[0]
+    assert any("No space left on device" in ln and "o.jsonl.partial" in ln for ln in err)
+
+
+def test_live_help_documents_exit_codes(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["live", "--help"])
+    out = capsys.readouterr().out
+    for frag in ("0 ", "1 ", "2 ", "3 ", "130"):
+        assert frag in out.split("exit codes", 1)[1]
+
+
+def test_headless_duration_excludes_detect_time(tmp_path, monkeypatch, fake_collector):
+    ft = FakeTime()
+
+    def slow_detect(**kw):
+        ft.now += 5.0  # detect() is slow (dcgmi probe)
+        return caps()
+
+    monkeypatch.setattr(cli, "detect", slow_detect)
+    fake_collector.records_on_start = [mk(1)]
+    code, _ = run_main([*HEADLESS, str(tmp_path / "o.jsonl")], ft)
+    assert code == 0 and sum(ft.sleeps) == pytest.approx(3.0)

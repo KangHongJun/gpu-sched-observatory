@@ -99,17 +99,26 @@ def read_jsonl(path) -> list[Record]:
 
 
 class _Stream:
-    """Appending writer, flushed after every ``write``. Writes straight to ``path``."""
+    """Appending writer, flushed after every ``write``.
+
+    Data goes to ``<path>.partial`` (a stale one is overwritten); the target is untouched until
+    ``commit()`` atomically replaces it. ``commit()`` with zero records keeps the target and removes
+    the partial. ``close()`` just closes, leaving the partial in place when it holds data (use it
+    after an I/O error); a stream dropped without either leaves the flushed data in the partial.
+    """
 
     def __init__(self, path) -> None:
         self.path = Path(path)
+        self.partial_path = self.path.with_name(self.path.name + ".partial")
         self.count = 0
-        self._f = open(self.path, "w", encoding="utf-8", newline="")  # noqa: SIM115
+        self._f = open(self.partial_path, "w", encoding="utf-8", newline="")  # noqa: SIM115
         try:
             self._start()
             self._f.flush()
         except BaseException:
             self._f.close()
+            with contextlib.suppress(OSError):
+                self.partial_path.unlink()
             raise
 
     def _start(self) -> None:
@@ -126,12 +135,29 @@ class _Stream:
                 n += 1
         finally:
             self.count += n
-            self._f.flush()
+            if not self._f.closed:
+                with contextlib.suppress(OSError):
+                    self._f.flush()
         return n
 
     def close(self) -> None:
         if not self._f.closed:
-            self._f.close()
+            with contextlib.suppress(OSError):
+                self._f.close()
+        if self.count == 0:
+            with contextlib.suppress(OSError):
+                self.partial_path.unlink()
+
+    def commit(self) -> None:
+        """Finish an orderly run: replace the target with the partial (if anything was written)."""
+        if self._f.closed and not self.partial_path.exists():
+            return  # already committed or discarded
+        self._f.close()
+        if self.count == 0:
+            with contextlib.suppress(OSError):
+                self.partial_path.unlink()
+            return
+        os.replace(self.partial_path, self.path)
 
 
 class JsonlStream(_Stream):
@@ -152,11 +178,28 @@ def open_stream(path) -> _Stream:
     return (JsonlStream if _format_of(path) == "jsonl" else CsvStream)(path)
 
 
-def drain_to(buffer: RingBuffer, sink, cursor: int) -> tuple[int, int]:
-    """Write everything pushed since ``cursor`` to ``sink`` exactly once, in push order.
+class Drainer:
+    """Copies a ``RingBuffer`` into a sink exactly once and in push order.
 
-    Returns ``(new_cursor, lost)``; ``lost`` counts records the ring overwrote before this drain.
+    The cursor (a push sequence number) moves one record at a time, only after that record reached
+    the sink, so an exception of any kind (Ctrl-C, I/O error) leaves it at the first unwritten
+    record. ``lost`` totals records the ring overwrote before they could be read; it is added when
+    first observed and never again for a re-read range.
     """
-    records, nxt, lost = buffer.read_from(cursor)
-    sink.write(records)
-    return nxt, lost
+
+    def __init__(self, buffer: RingBuffer, sink) -> None:
+        self._buffer = buffer
+        self._sink = sink
+        self.cursor = 0
+        self.lost = 0
+
+    def drain(self) -> int:
+        records, nxt, lost = self._buffer.read_from(self.cursor)
+        self.lost += lost
+        self.cursor = nxt - len(records)  # sequence number of records[0]; skips the lost range
+        n = 0
+        for r in records:
+            self._sink.write([r])
+            self.cursor += 1
+            n += 1
+        return n
