@@ -8,7 +8,7 @@
 |---|---|---|---|---|
 | G1 | A5000에서 DCGM 1001~1005가 나오는가 | Live에 5개 막대 표시 | 해당 필드는 `N/A`, Live는 NVML 중심 | 통과: 1001~1005 전부 지원되고 0이 아닌 값이 관측됨(1004는 FP16 행렬곱 부하에서 0.951~0.959, small_kernels에서는 0.000). 1006만 미지원 |
 | G2 | nsys가 외부 프로세스의 Context 전환을 PID와 함께 잡는가 | 3주차를 nsys 캡처로 진행 | 3주차를 "직접 띄운 프로세스의 커널 타임라인"으로 축소 | **잠정: 통과(비루트 기준).** nsys 2026.6.1이 sudo 없이, 대상 프로세스를 띄우지 않고도 외부 워크로드 A/B의 GPU 컨텍스트 전환 이벤트를 PID와 함께 기록했다. root 실행과의 차이(특히 타 사용자 프로세스의 PID 마스킹)는 미확인: 아래 "사용자 실행 대기" 참고 |
-| G3 | SQLite export에서 전환·커널 테이블을 읽을 수 있는가 | Task 18을 실제 스키마로 구현 | nsys의 다른 export 형식(json)을 검토 | 미정 |
+| G3 | SQLite export에서 전환·커널 테이블을 읽을 수 있는가 | Task 18을 실제 스키마로 구현 | nsys의 다른 export 형식(json)을 검토 | **통과(캡처 방식별로 범위가 다름, 비루트 기준).** 전역 캡처의 SQLite에서 컨텍스트 전환(`GPU_CONTEXT_SWITCH_EVENTS`)을 PID·GPU별로 읽을 수 있고, 직접 띄운 캡처의 SQLite에서 커널(`CUPTI_ACTIVITY_KIND_KERNEL`)을 읽을 수 있다. 한 파일에서 두 가지를 함께 얻는 것은 이번 캡처로는 안 된다(전역 캡처엔 커널 테이블이 없고 직접 캡처엔 전환이 7건뿐). 커널 테이블에는 큐/제출 시각 열이 없다(`start`/`end`만, 런타임 API 시각으로 근사 가능). 상세: `nsys-schema.md` |
 | G4 | MPS ON에서 전환 이벤트와 커널 중첩이 어떻게 달라지는가 | 결과대로 표시 규칙 확정 | 전환은 `N/A`, overlap과 앱 성능 우선 | 미정 |
 | G5 | CUPTI를 외부 프로세스에 붙일 수 있는가 | MVP 이후 collector 설계 입력 | MVP 이후 과제로만 기록 | 미정 |
 | G6 | 수집 오버헤드가 얼마인가 | README에 수치 기재 | 기본 수집 주기를 낮춘다 | 미정 |
@@ -134,7 +134,7 @@ for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 1 --du
 - 열: `tag, vmId, seqNo, contextId, timestamp, globalPid, gpuId` (`raw/04_sqlite_look2_nonroot.txt`). `tag`는 `ENUM_GPU_CTX_SWITCH`의 값이며 이번 캡처에서는 7(SAVE_END)과 8(RESTORE_START)만 나왔다(각 약 99,000건).
 - GPU별 구분: 된다. `gpuId`가 이벤트에 있고 `TARGET_INFO_GPU`의 PCI 버스 ID로 nvidia-smi 인덱스와 일치한다(nsys gpuId 1 = nvidia-smi GPU 1; `raw/04_smi_bus.txt`). GPU 1: 194,592건, GPU 0: 3,357건, GPU 2: 0건. GPU 0 이벤트는 다른 사용자의 워크로드로 보이며 우리 것이 아니다.
 - PID 식별: **된다.** GPU 1 이벤트의 `globalPid`는 정확히 두 종류이고, `(globalPid >> 24) & 0xFFFFFF`가 워크로드 A/B의 PID(워크로드 JSON의 `pid`)와 각각 일치한다. `PROCESSES` 테이블(`globalPid`, `pid`, `name`)에도 두 PID가 있다(`raw/04_sqlite_look3_nonroot.txt`, `04_sqlite_look4_nonroot.txt`). 이 디코딩은 관측에서 맞춘 것이며 공식 문서로 확인하지 않았다.
-- A/B 이벤트 수: 각각 약 97,000건(A 97,299, B 97,293). 10초 캡처에서 GPU 1 전체 194,592건. 시간순으로 A의 7,8 다음 B의 8,7이 번갈아 나온다(첫 12건 확인). `contextId`도 프로세스별로 하나씩이다.
+- A/B 이벤트 수: 각각 약 97,000건(A 97,299, B 97,293). 10초 캡처에서 GPU 1 전체 194,592건. 시간순으로 두 프로세스 모두 8(RESTORE_START) 다음 7(SAVE_END) 순이고, 첫 이벤트는 B의 8이며 이후 `B8, B7, A8, A7, B8, B7, A8, A7`로 프로세스가 번갈아 나온다(Task 5에서 원본 전체로 재확인). `contextId`도 프로세스별로 하나씩이다.
 - 마스킹: GPU 0의 다른 사용자 프로세스는 `globalPid`가 `1<<48`(PID 필드 0) 한 종류로만 나온다(3,357건, contextId 0). 같은 사용자의 워크로드는 마스킹되지 않았다. 다른 사용자 프로세스가 여러 개여도 하나로 합쳐 보이는지는 별도 확인하지 않았다(GPU 0 `nvidia-smi`에는 여러 PID가 있었다).
 - 타임스탬프: 정수, 캡처 시작 기준 ns로 보인다(최소 259,841, 최대 약 10.117e9로 10초 캡처와 일치). 워크로드 A/B 교대 주기는 약 177 µs(첫 이벤트 쌍들의 간격에서). 2-process 시 p50 지연 0.166 ms(Task 2)와 같은 크기다.
 - 부수 관찰: `PROCESSES` 테이블에 시스템 전체 2,110개 프로세스(이름 포함)가 들어간다. 캡처 파일은 반드시 git 밖(`raw/`)에만 둔다.
@@ -152,7 +152,29 @@ for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 1 --du
 
 ## Task 5: SQLite 스키마 기록과 fixture (G3)
 
-(결과 없음)
+**판정: 통과(비루트, 캡처 방식별로 범위가 다름).** 스키마, 열 의미, 구간 규칙, 미확인 목록은 `docs/verification/nsys-schema.md`에 있다. 이번 작업은 root 캡처 없이 Task 4의 두 export(`ctx_nonroot`, `ctx_launched`)로 했다(Step 1 export는 Task 4에서 완료).
+
+### 읽을 수 있는 것
+- **전역 캡처**: `GPU_CONTEXT_SWITCH_EVENTS`(tag, vmId, seqNo, contextId, timestamp, globalPid, gpuId). `ENUM_GPU_CTX_SWITCH`가 태그 -1, 0~11을 정의한다(7 `SAVE_END`, 8 `RESTORE_START`가 관측된 전부이고 나머지 값의 의미/출현은 미확인). 시각은 캡처 시작 기준 ns. PID는 `(globalPid >> 24) & 0xFFFFFF`: 워크로드 JSON의 PID와 일치하고, `PROCESSES`의 2,110행 전부에서도 성립하지만(교차 검증) 공식 문서로 확인하지 않은 경험식이다. 다른 사용자는 `globalPid == 1<<48`(PID 0)로 합쳐져 프로세스별로 구분되지 않는다.
+- **직접 띄운 캡처**: `CUPTI_ACTIVITY_KIND_KERNEL`(`start`, `end`, `deviceId`, `contextId`, `streamId`, `correlationId`, `globalPid`, 이름은 `StringIds` 참조). **큐/제출 시각 열은 없다**(`qmd*Done` 열은 있으나 전 행 NULL). 런타임 API 시각(`CUPTI_ACTIVITY_KIND_RUNTIME`, `correlationId` 조인)으로 근사하며 `kernel.start - runtime.start` p50 4.9 µs. `deviceId`는 프로세스 안의 CUDA 번호(CUDA_VISIBLE_DEVICES=1이라 0)이고 실제 GPU는 `TARGET_INFO_CUDA_DEVICE(gpuId, cudaId, pid)`로 얻는다. 두 테이블의 `contextId`는 서로 다른 번호 공간이다.
+- **유실 표시**: 전용 테이블/열은 없고 `DIAGNOSTIC_EVENT.text`의 문장("Number of GPU context switch events collected: N", CUPTI 이벤트 누락/폐기 경고)과 `seqNo`의 연속성이 전부다. 이번 전역 캡처는 수집 개수가 행 수와 같고 `seqNo` 틈이 0건이다.
+
+### 활성 구간 규칙 (전역 캡처 GPU 1, 워크로드 A/B)
+- 문자 그대로: 8=`RESTORE_START`, 7=`SAVE_END`. 해석: 같은 컨텍스트의 8에서 다음 7까지를 "그 컨텍스트가 올라와 있던 구간"으로 본다. 7 없이 8이 다시 오면 이전 8은 버리고(56건), 짝 없는 7은 버린다(136건). 열린 채 끝난 8은 0건.
+- 구간 97,200개, 서로 다른 컨텍스트 구간 간 겹침 0건, 구간 안에 다른 컨텍스트 이벤트가 낀 구간 0건. 길이 p50/p95/p99 = 37.4/37.4/37.5 µs(99.88%가 35~40 µs, 100 µs 이상 97건, 최대 27.5 ms). 연속 구간 사이 간격 p50 52.6 µs이며 이를 전환 비용이라 부르지 않는다(그 시간의 GPU 활동은 이벤트로 알 수 없음). 구간 합은 시간폭의 41%.
+- 한계: 이 규칙은 한 쌍의 프로세스·GPU 1에서만 확인했고, 경합 중 구간을 실제 커널 실행과 대조하지 못했다(전역 캡처에 커널이 없음).
+
+### 비루트 전역 캡처의 마지막 이벤트
+- 마지막 이벤트(10.117 s)가 "Profiling has stopped"(10.000 s)보다 늦다. 원인 미확인.
+
+### fixture
+- `tests/fixtures/nsys_ctxsw_min.sqlite`(393 KB): 전역 캡처에서 워크로드 A/B 이벤트(캡처 시작 후 0.6초 미만, 11,440행)와 마스킹 행 50개. 지시한 2초는 500 KB 한도를 넘어(1초가 약 630 KB) 0.6초로 줄였다.
+- `tests/fixtures/nsys_launched_min.sqlite`(352 KB): 직접 띄운 캡처에서 앞 2,000 커널, 대응하는 런타임 행, 참조된 `StringIds`, 컨텍스트 전환 7행.
+- 둘 다 `PROCESSES` 없음, UUID는 NULL, 호스트/사용자/명령줄 정보 없음. `scripts/verify/make_nsys_fixture.py`가 끝에서 개인정보 검사를 수행한다.
+
+### 미확인
+- root 캡처에서 PID 마스킹이 풀리는지, 태그 7/8 외 값의 출현, 경합 중 구간과 커널 실행의 대응, 3개 이상 컨텍스트·MPS에서의 규칙(Task 6), 구간 사이 간격의 정체. 전체 목록은 `nsys-schema.md` 11절.
+
 
 ## Task 6: MPS OFF/ON 수집 차이 (G4)
 
