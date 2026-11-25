@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Fix round 1: derive restore_save / hold interval totals from the raw exports (read-only)."""
+"""Derive restore_save / hold interval totals from the raw exports (read-only).
+
+Window (single definition): w0 = 0; w1 = max(ts of the "Profiling has stopped." DIAGNOSTIC_EVENT row,
+largest GPU_CONTEXT_SWITCH_EVENTS.timestamp over all gpuIds incl. masked rows; largest event ts if no diag row).
+"""
 
 import sqlite3
 import sys
@@ -21,7 +25,14 @@ def pct(v, p):
 def build(rows, w0, w1):
     """rows: (tag, globalPid, ts) of one gpuId in (ts, seqNo) order. Returns (restore_save, hold, counts)."""
     rs, op, seen = [], {}, set()
-    c = {"unmatched7": 0, "reopen8": 0, "leading7": 0, "trailing8": 0, "hold_same8": 0}
+    c = {
+        "unmatched7": 0,
+        "reopen8": 0,
+        "leading7": 0,
+        "trailing8": 0,
+        "hold_same8": 0,
+        "hold_leading7": 0,
+    }
     for t, g, ts in rows:
         if g == MASKED:
             continue
@@ -41,8 +52,14 @@ def build(rows, w0, w1):
     for g, t0 in op.items():
         rs.append((g, t0, w1))
         c["trailing8"] += 1
-    hold, cur = [], None
+    hold, cur, seen_h = [], None, set()
     for t, g, ts in rows:
+        if t == 7 and g != MASKED and g not in seen_h and cur is None:
+            # choice: first event of a context is a 7 and nobody holds yet -> it held since w0
+            cur = (g, w0)
+            c["hold_leading7"] += 1
+        if g != MASKED:
+            seen_h.add(g)
         if t != 8:
             continue
         if cur is not None and g == cur[0]:
@@ -93,7 +110,16 @@ def main():
     rows = con.execute(
         "select tag, globalPid, timestamp from GPU_CONTEXT_SWITCH_EVENTS where gpuId=1 order by timestamp, seqNo"
     ).fetchall()
-    w0, w1 = rows[0][2], rows[-1][2]
+    stop0 = con.execute(
+        "select max(timestamp) from DIAGNOSTIC_EVENT where text='Profiling has stopped.'"
+    ).fetchone()[0]
+    maxev = con.execute(
+        "select max(timestamp) from GPU_CONTEXT_SWITCH_EVENTS"
+    ).fetchone()[0]
+    w0, w1 = 0, max(stop0, maxev)
+    print(
+        f"window: w0=0, stop diag={stop0}, max event ts (all gpuIds)={maxev}, w1={w1}"
+    )
     rs, _hold = report("ctx_nonroot GPU 1", rows, w0, w1, nm)
     # same-context 8->7 (restore_save) and cross-context 7->8 distributions
     d = [y - x for _, x, y in rs]
@@ -125,17 +151,11 @@ def main():
     print(
         f"launched GPU1 events={len(lrows)} kernels start {kmin / 1e9:.3f}..{kmax / 1e9:.3f} s, stop diag {stop / 1e9:.3f} s"
     )
-    lw0, lw1 = lrows[0][2], lrows[-1][2]
-    report(
-        "launched GPU 1, window = [first,last event]", lrows, lw0, lw1, lambda g: "P"
-    )
-    report(
-        "launched GPU 1, window = [first event, Profiling has stopped]",
-        lrows,
-        lw0,
-        stop,
-        lambda g: "P",
-    )
+    lmax = lc.execute(
+        "select max(timestamp) from GPU_CONTEXT_SWITCH_EVENTS"
+    ).fetchone()[0]
+    lw1 = max(stop, lmax)
+    report(f"launched GPU 1, window [0, {lw1}]", lrows, 0, lw1, lambda g: "P")
     closed = [(lrows[0][2], lrows[1][2])]
     n = lc.execute(
         "select count(*) from CUPTI_ACTIVITY_KIND_KERNEL where end > ? and start < ?",
