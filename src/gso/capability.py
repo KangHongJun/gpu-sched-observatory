@@ -66,32 +66,37 @@ def _query_nvml(nvml) -> tuple[list[GpuInfo], bool, str | None]:
         driver = _s(nvml.nvmlSystemGetDriverVersion())
         gpus: list[GpuInfo] = []
         mps = False
+        skipped: list[str] = []
         for i in range(nvml.nvmlDeviceGetCount()):
-            h = nvml.nvmlDeviceGetHandleByIndex(i)
+            call = "nvmlDeviceGetHandleByIndex"
             try:
-                mig = nvml.nvmlDeviceGetMigMode(h)[0] == 1
-            except nvml.NVMLError:
-                mig = False
-            try:
+                h = nvml.nvmlDeviceGetHandleByIndex(i)
+                try:
+                    mig = nvml.nvmlDeviceGetMigMode(h)[0] == 1
+                except nvml.NVMLError:
+                    mig = False
+                call = "nvmlDeviceGetUUID"
+                uuid = _s(nvml.nvmlDeviceGetUUID(h))
+                call = "nvmlDeviceGetName"
+                name = _s(nvml.nvmlDeviceGetName(h))
+            except Exception as e:  # noqa: BLE001 - 이 장치만 건너뛴다
+                skipped.append(f"GPU {i}: {call} failed ({e})")
+                continue
+            gpus.append(GpuInfo(i, uuid, name, driver, mig))
+            with contextlib.suppress(Exception):
                 if nvml.nvmlDeviceGetMPSComputeRunningProcesses(h):
                     mps = True
-            except nvml.NVMLError:
-                pass
-            gpus.append(
-                GpuInfo(
-                    i,
-                    _s(nvml.nvmlDeviceGetUUID(h)),
-                    _s(nvml.nvmlDeviceGetName(h)),
-                    driver,
-                    mig,
-                )
-            )
-        return gpus, mps, None
+        error = "skipped " + "; ".join(skipped) if skipped else None
+        return gpus, mps, error
     except Exception as e:  # noqa: BLE001
         return [], False, f"NVML query failed: {e}"
     finally:
         with contextlib.suppress(Exception):
             nvml.nvmlShutdown()
+
+
+def _first_line(text: str) -> str:
+    return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
 
 
 def _detect_dcgm(cmd, index, run, which) -> DcgmStatus:
@@ -119,17 +124,26 @@ def _detect_dcgm(cmd, index, run, which) -> DcgmStatus:
         return no(f"could not run {' '.join(cmd)}: {e}")
     out = (r.stdout or "") + (r.stderr or "")
     if r.returncode != 0:
-        detail = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
+        detail = _first_line(out)
+        low = out.lower()
+        if "host engine" in low or "hostengine" in low or "connection" in low:
+            return no(
+                "dcgmi could not reach the DCGM host engine"
+                + (f" ({detail})" if detail else "")
+                + "; start nv-hostengine (or the DCGM container) and retry."
+            )
         return no(
-            "dcgmi could not reach the DCGM host engine"
-            + (f" ({detail})" if detail else "")
-            + "; start nv-hostengine (or the DCGM container) and retry."
+            f"dcgmi exited with code {r.returncode}"
+            + (f": {detail}" if detail else "")
+            + "; check the dcgmi command and --dcgm-gpu-index."
         )
     fields = parse_profile_fields(out)
     if not any(fields.values()):
         return no(
             "dcgmi profile -l listed none of the profiling fields 1001-1005 "
-            f"for GPU index {index}; check --dcgm-gpu-index."
+            f"for GPU index {index}"
+            + (f" (output: {_first_line(out)})" if _first_line(out) else "")
+            + "; check --dcgm-gpu-index."
         )
     return DcgmStatus(True, "ok", fields)
 

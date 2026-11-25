@@ -67,7 +67,15 @@ def test_nsys_missing_is_not_an_error():
 def test_parse_profile_fields_fixture():
     fields = parse_profile_fields(PROFILE_TEXT)
     assert all(fields[i] for i in (1001, 1002, 1003, 1004, 1005))
-    assert 1006 not in fields or fields[1006] is False
+    assert 1006 not in fields
+
+
+def test_parse_profile_fields_negative_cases():
+    no_1004 = "| A.1 | 1002 | sm_active |\n| D.0 | 1001 | gr_engine_active |\n"
+    assert parse_profile_fields(no_1004)[1004] is False
+    lookalike = "| A.1 | 11001 | something |\n"
+    fields = parse_profile_fields(lookalike)
+    assert fields[1001] is False and fields[1004] is False
 
 
 def test_dcgm_available_path():
@@ -127,6 +135,34 @@ def test_run_timeout_is_unavailable():
     exc = subprocess.TimeoutExpired(cmd="dcgmi", timeout=5)
     caps = det(which=any_which, run=fake_run(raises=exc))
     assert caps.dcgm.available is False and "timed out" in caps.dcgm.reason
+
+
+@pytest.mark.parametrize(
+    "out, needle",
+    [
+        ("Error: unable to find GPU id 9", "GPU id 9"),
+        ("Error response from daemon: No such container: gso-dcgm", "No such container"),
+    ],
+)
+def test_nonzero_exit_not_host_engine(out, needle):
+    caps = det(which=any_which, run=fake_run(returncode=1, stderr=out))
+    reason = caps.dcgm.reason
+    assert "exited with code 1" in reason and needle in reason
+    assert "host engine" not in reason
+    assert "--dcgm-gpu-index" in reason
+
+
+def test_connection_failure_is_host_engine():
+    caps = det(
+        which=any_which,
+        run=fake_run(returncode=1, stdout="Error: unable to establish a connection"),
+    )
+    assert "host engine" in caps.dcgm.reason
+
+
+def test_zero_exit_no_fields_quotes_output():
+    caps = det(which=any_which, run=fake_run(stdout="\nsomething odd happened\n"))
+    assert "something odd happened" in caps.dcgm.reason
 
 
 def test_zero_exit_but_no_fields_is_unavailable():
@@ -261,3 +297,50 @@ def test_doctor_cli_available_shows_fields_and_options(monkeypatch, capsys):
     assert rc == 0
     assert seen["dcgmi_cmd"] == DOCKER_CMD and seen["dcgm_gpu_index"] == 0
     assert "1004" in out and "/opt/nsys/bin/nsys" in out
+
+
+# --- 기본 MPS listing (autouse 스텁을 우회) ---------------------------------
+REAL_MPS_LISTING = capability._default_mps_listing
+
+
+@pytest.mark.parametrize("rc, expected", [(0, True), (1, False)])
+def test_default_mps_listing_pgrep(monkeypatch, rc, expected):
+    run = fake_run(returncode=rc)
+    monkeypatch.setattr(capability.subprocess, "run", run)
+    assert REAL_MPS_LISTING() is expected
+    # 15자로 잘린 comm 이름에 대한 정확 일치여야 한다(전체 이름은 매칭되지 않는다).
+    assert run.argvs == [["pgrep", "-x", "nvidia-cuda-mps"]]
+
+
+def test_default_mps_listing_oserror_is_false_via_detect(monkeypatch):
+    monkeypatch.setattr(capability.subprocess, "run", fake_run(raises=OSError))
+    monkeypatch.setattr(capability, "_default_mps_listing", REAL_MPS_LISTING)
+    assert det(mps_listing=None).mps_active is False
+
+
+# --- 장치별 NVML 오류 --------------------------------------------------------
+def test_per_device_error_keeps_others():
+    f = FakeNvml(
+        gpus=[{}, {}, {}],
+        mps_procs={2: [1]},
+        errors={"nvmlDeviceGetUUID": {1: FakeNvml.NVMLError("boom")}},
+    )
+    caps = det(nvml=f)
+    assert [g.index for g in caps.gpus] == [0, 2]
+    assert "1" in caps.nvml_error and "nvmlDeviceGetUUID" in caps.nvml_error
+    assert caps.mps_active is True
+    assert f.calls.count("nvmlShutdown") == 1
+
+
+def test_per_device_non_nvml_exception_skips():
+    f = FakeNvml(
+        gpus=[{}, {}],
+        errors={"nvmlDeviceGetName": {0: RuntimeError("weird")}},
+    )
+    caps = det(nvml=f)
+    assert [g.index for g in caps.gpus] == [1]
+    assert caps.nvml_error
+
+
+def test_nvml_error_none_when_all_ok():
+    assert det(nvml=FakeNvml(gpus=[{}, {}])).nvml_error is None
