@@ -15,17 +15,22 @@ def ms(values):
     return statistics.mean(values), sd
 
 
-def load(cond):
+def load(cond, prefix):
     reps = []
-    for path in sorted(RAW.glob(f"08_{cond}_r[0-9]_a.json")):
+    for path in sorted(RAW.glob(f"{prefix}_{cond}_r[0-9]_a.json")):
         a = json.loads(path.read_text())
-        b = json.loads(path.with_name(path.name.replace("_a.json", "_b.json")).read_text())
+        partner = path.with_name(path.name.replace("_a.json", "_b.json"))
+        if not partner.exists():
+            print(f"건너뜀: {path.name}의 짝 {partner.name}이 없다", file=sys.stderr)
+            continue
+        b = json.loads(partner.read_text())
         reps.append((a, b))
     return reps
 
 
 def main():
-    data = {c: load(c) for c in CONDS}
+    prefix = sys.argv[1] if len(sys.argv) > 1 else "08"
+    data = {c: load(c, prefix) for c in CONDS}
     base_sum = None
     base_sd = None
     print("조건 | n | A iter/s | B iter/s | 합계 iter/s | 합계 변화 | p99 ms (A,B 평균 per rep)")
