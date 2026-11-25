@@ -14,6 +14,7 @@ FIXTURE_LINES = FIXTURE.read_text().splitlines(keepends=True)
 DATA_ROWS = [ln for ln in FIXTURE_LINES if ln.startswith("GPU")]
 IDS = [1001, 1002, 1003, 1004, 1005]
 ALL = {i: True for i in IDS}
+BLOCK = {"block": True}
 ERR = "Error setting watches. Result: -6: Feature not supported\n"
 
 
@@ -57,15 +58,19 @@ class FakeProc:
 
 
 class FakePopen:
-    def __init__(self, **proc_kwargs):
+    def __init__(self, seq=None, **proc_kwargs):
         self.kwargs = proc_kwargs
+        self.seq = seq  # optional per-spawn kwargs; the last entry repeats
         self.calls = []
+        self.procs = []
         self.proc = None
 
     def __call__(self, argv, **kw):
         self.calls.append(argv)
-        self.proc = FakeProc(**self.kwargs)
-        if not self.kwargs.get("block"):
+        kwargs = self.seq[min(len(self.calls), len(self.seq)) - 1] if self.seq else self.kwargs
+        self.proc = FakeProc(**kwargs)
+        self.procs.append(self.proc)
+        if not kwargs.get("block"):
             self.proc._done.set()
         return self.proc
 
@@ -128,10 +133,11 @@ def test_parse_nonfinite():
 # ---- provider ---------------------------------------------------------------
 
 def test_fixture_all_supported():
-    fp = FakePopen(lines=FIXTURE_LINES)
+    fp = FakePopen(seq=[{"lines": FIXTURE_LINES}, BLOCK])
     p, buf = make(fp)
     p.start()
-    assert wait_until(lambda: not p.running)
+    assert wait_until(lambda: len(buf) == 5 * len(DATA_ROWS))
+    p.stop()
     recs = buf.snapshot()
     assert len(recs) == 5 * len(DATA_ROWS)
     assert all(r.unit == "%" and r.source == "dcgm" and r.scope is Scope.DEVICE for r in recs)
@@ -142,16 +148,17 @@ def test_fixture_all_supported():
     assert first[0].value == pytest.approx(99.2)
     assert all(r.quality is Quality.MEASURED for r in recs)
     assert fp.calls[0] == [
-        "dcgmi", "dmon", "-i", "0", "-e", "1001,1002,1003,1004,1005", "-d", "1000",
+        "dcgmi", "dmon", "-i", "0", "-e", "1001,1002,1003,1004,1005", "-d", "1000", "-c", "15",
     ]
 
 
 def test_partial_support_argv_and_unsupported_records():
     sup = {1001: True, 1002: True, 1003: True, 1004: False, 1005: True}
-    fp = FakePopen(lines=DATA_ROWS[:3])
+    fp = FakePopen(seq=[{"lines": DATA_ROWS[:3]}, BLOCK])
     p, buf = make(fp, supported=sup)
     p.start()
-    assert wait_until(lambda: not p.running)
+    assert wait_until(lambda: len(buf) == 15)
+    p.stop()
     argv = fp.calls[0]
     assert argv[argv.index("-e") + 1] == "1001,1002,1003,1005"
     recs = buf.snapshot()
@@ -167,10 +174,11 @@ def test_partial_support_argv_and_unsupported_records():
 
 
 def test_na_token_gives_dropped():
-    fp = FakePopen(lines=["GPU 0  0.5 N/A 0.2 0.0 0.1\n"])
+    fp = FakePopen(seq=[{"lines": ["GPU 0  0.5 N/A 0.2 0.0 0.1\n"]}, BLOCK])
     p, buf = make(fp)
     p.start()
-    assert wait_until(lambda: not p.running)
+    assert wait_until(lambda: len(buf) == 5)
+    p.stop()
     recs = buf.snapshot()
     assert len(recs) == 5
     assert recs[1].quality is Quality.DROPPED and recs[1].value is None
@@ -195,7 +203,7 @@ def test_container_argv_exact():
     p.start()
     assert fp.calls[0] == [
         "docker", "exec", "gso-dcgm", "dcgmi", "dmon", "-i", "0",
-        "-e", "1001,1002,1003,1004,1005", "-d", "100",
+        "-e", "1001,1002,1003,1004,1005", "-d", "100", "-c", "150",
     ]
     p.start()  # no-op while running
     assert len(fp.calls) == 1
@@ -268,3 +276,81 @@ def test_real_process_false():
     assert len(buf) == 0
     p.stop()
     assert not p.running
+
+
+# ---- fix round 1 ---------------------------------------------------------------
+
+def test_run_seconds_validation_and_count():
+    with pytest.raises(ValueError):
+        DcgmProvider(0, "u", RingBuffer(10), ALL, run_seconds=0)
+    fp = FakePopen(block=True)
+    p, _ = make(fp, interval_ms=300, run_seconds=1.0)
+    p.start()
+    assert fp.calls[0][-2:] == ["-c", "4"]  # ceil(1000/300)
+    p.stop()
+
+
+def test_respawn_after_clean_exit():
+    fp = FakePopen(seq=[{"lines": DATA_ROWS[:2], "returncode": 0}, {"block": True}])
+    p, buf = make(fp)
+    p.start()
+    assert wait_until(lambda: len(fp.calls) == 2)
+    assert fp.calls[0] == fp.calls[1]
+    assert wait_until(lambda: len(buf) == 10)
+    assert p.error is None and p.running
+    p.stop()
+    assert not p.running and p.error is None
+    assert len(fp.calls) == 2
+    assert fp.procs[1].terminated
+
+
+def test_no_respawn_after_nonzero_exit():
+    fp = FakePopen(lines=DATA_ROWS[:1], returncode=3)
+    p, _ = make(fp)
+    p.start()
+    assert wait_until(lambda: not p.running)
+    assert len(fp.calls) == 1
+    assert p.error and "3" in p.error
+
+
+def test_exit_zero_without_data_is_error():
+    fp = FakePopen(lines=["#Entity 1001\n", "ID\n", "something odd\n"], returncode=0)
+    p, buf = make(fp)
+    p.start()
+    assert wait_until(lambda: not p.running)
+    assert len(fp.calls) == 1
+    assert p.error and "without data" in p.error and "something odd" in p.error
+    assert len(buf) == 0
+
+
+def test_stop_while_first_child_blocking_no_second_spawn():
+    fp = FakePopen(block=True)
+    p, _ = make(fp)
+    p.start()
+    p.stop()
+    time.sleep(0.05)
+    assert len(fp.calls) == 1
+    assert fp.procs[0].terminated and not p.running
+
+
+def test_reader_exception_sets_error_and_terminates_child():
+    class BadBuf:
+        def push(self, r):
+            raise RuntimeError("boom")
+
+    fp = FakePopen(lines=DATA_ROWS[:1], block=True)
+    p = DcgmProvider(0, "u", BadBuf(), ALL, popen=fp)
+    p.start()
+    assert wait_until(lambda: not p.running)
+    assert "RuntimeError" in p.error and "boom" in p.error
+    assert fp.procs[0].terminated
+    p.stop()
+
+
+def test_error_uses_last_output_line():
+    fp = FakePopen(lines=["WARNING: something\n", "Error: real problem\n"], returncode=2)
+    p, _ = make(fp)
+    p.start()
+    assert wait_until(lambda: not p.running)
+    assert "real problem" in p.error and "2" in p.error
+    assert "WARNING" not in p.error
