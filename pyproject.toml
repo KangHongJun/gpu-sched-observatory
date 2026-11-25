@@ -13,7 +13,11 @@ dependencies = [
 gso = "gso.cli:main"
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = [
+    "pytest",
+    "pytest-asyncio>=1.5.0",
+    "ruff",
+]
 bench = ["torch"]
 
 [build-system]
@@ -25,3 +29,5 @@ packages = ["src/gso"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
