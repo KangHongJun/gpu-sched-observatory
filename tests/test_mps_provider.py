@@ -19,21 +19,44 @@ _STDIN_OK = re.compile(
 )
 
 
+_CURRENT: list[str] | None = None
+
+
+@pytest.fixture(autouse=True)
+def violations():
+    """Fresh violation list per test; fails the test at teardown if any fake call broke the
+    read-only contract (even if the module under test swallowed the failure)."""
+    global _CURRENT
+    _CURRENT = []
+    yield _CURRENT
+    found, _CURRENT = list(_CURRENT), None
+    assert not found, "read-only violations recorded by fake run: " + "; ".join(found)
+
+
 def scripted(replies):
-    """Fake subprocess.run. Enforces the read-only guarantee on EVERY call, in every test:
+    """Fake subprocess.run. Checks the read-only guarantee on EVERY call, in every test:
     bare argv, stdin is exactly one allowed command line, a timeout is given.
 
     replies: callable(command_without_newline) -> (returncode, stdout) | exception."""
 
     def run(argv, *args, **kwargs):
-        assert argv == ["nvidia-cuda-mps-control"], argv
-        assert not args
-        assert _STDIN_OK.fullmatch(kwargs["input"]), repr(kwargs["input"])
-        assert kwargs.get("timeout"), kwargs
+        # Record (never raise) so a failure swallowed by the code under test still fails the test.
+        if _CURRENT is None:
+            raise RuntimeError("fake run used outside the autouse violations fixture")
+        stdin = kwargs.get("input")
+        if list(argv) != ["nvidia-cuda-mps-control"]:
+            _CURRENT.append(f"argv {list(argv)!r}")
+        if args:
+            _CURRENT.append(f"extra positional args {args!r}")
+        if not isinstance(stdin, str) or not _STDIN_OK.fullmatch(stdin):
+            _CURRENT.append(f"stdin {stdin!r}")
+        if not kwargs.get("timeout"):
+            _CURRENT.append("missing timeout")
+        stdin = stdin if isinstance(stdin, str) else ""
         run.argvs.append(list(argv))
         run.kwargs.append(kwargs)
-        run.commands.append(kwargs["input"])
-        r = replies(kwargs["input"][:-1])
+        run.commands.append(stdin)
+        r = replies(stdin[:-1])
         if isinstance(r, BaseException) or (isinstance(r, type) and issubclass(r, BaseException)):
             raise r() if isinstance(r, type) else r
         rc, out = r
@@ -218,3 +241,42 @@ def test_static_no_forbidden_words():
     src = Path(mps.__file__).read_text()
     for w in ("quit", "start_server", "terminate", "shutdown_server", "set_"):
         assert w not in src, w
+
+
+def _evil_send_now(verb, pid, run, env):
+    return run(["nvidia-cuda-mps-control", "--evil"], input="quit\n", capture_output=True, timeout=5)
+
+
+def test_guard_catches_violation_on_inactive_result(monkeypatch, violations):
+    run = scripted(lambda c: OSError("refused"))
+    monkeypatch.setattr(mps, "_send", _evil_send_now)
+    assert query(run=run) == MpsStatus(False, [], [], None)  # failure was swallowed...
+    assert violations  # ...but the fake recorded it
+    violations.clear()
+
+
+def test_guard_catches_violation_on_later_command(monkeypatch, violations):
+    run = scripted(happy)
+    real = mps._send
+
+    def send(verb, pid, run_, env):
+        if verb == "get_client_list":
+            return _evil_send_now(verb, pid, run_, env)
+        return real(verb, pid, run_, env)
+
+    monkeypatch.setattr(mps, "_send", send)
+    st = query(run=run)
+    assert st.active and st.client_pids == []
+    assert violations
+    violations.clear()
+
+
+def test_send_rejects_str_subclass():
+    class Sneaky(str):
+        def __format__(self, spec):
+            return "quit"
+
+    calls = []
+    with pytest.raises(ValueError):
+        mps._send(Sneaky("get_server_list"), None, lambda *a, **k: calls.append(a), {})
+    assert calls == []

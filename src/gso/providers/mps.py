@@ -45,8 +45,9 @@ def _send(verb: str, pid: int | None, run, env: Mapping[str, str]) -> subprocess
 
     The stdin text is built here from an exact allowed verb and an optional positive int, so
     extra tokens or newlines cannot be expressed. Anything else raises ValueError."""
-    if verb not in _ALLOWED:
+    if type(verb) is not str or verb not in _ALLOWED:
         raise ValueError(f"MPS command not allowed: {verb!r}")
+    verb = _ALLOWED[_ALLOWED.index(verb)]  # use our own literal, never the caller's object
     if verb == _SERVER_LIST:
         if pid is not None:
             raise ValueError(f"{verb} takes no pid")
