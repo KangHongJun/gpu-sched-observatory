@@ -14,7 +14,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 _BINARY = "nvidia-cuda-mps-control"
-_ALLOWED = frozenset({"get_server_list", "get_client_list", "get_active_thread_percentage"})
+_SERVER_LIST = "get_server_list"
+_ALLOWED = (_SERVER_LIST, "get_client_list", "get_active_thread_percentage")
 _PIPE_ENV = "CUDA_MPS_PIPE_DIRECTORY"
 _TIMEOUT_S = 5
 
@@ -34,20 +35,32 @@ def parse_pid_list(text: str) -> list[int]:
         s = line.strip()
         if s.isascii() and s.isdigit():
             n = int(s)
-            if n not in out:
+            if n > 0 and n not in out:
                 out.append(n)
     return out
 
 
-def _send(command: str, run, env: Mapping[str, str]) -> subprocess.CompletedProcess:
-    """The only place a control command leaves this module; rejects anything off the allow-list."""
-    if command.split(" ", 1)[0] not in _ALLOWED:
-        raise ValueError(f"MPS command not allowed: {command!r}")
+def _send(verb: str, pid: int | None, run, env: Mapping[str, str]) -> subprocess.CompletedProcess:
+    """The only place a control command leaves this module.
+
+    The stdin text is built here from an exact allowed verb and an optional positive int, so
+    extra tokens or newlines cannot be expressed. Anything else raises ValueError."""
+    if verb not in _ALLOWED:
+        raise ValueError(f"MPS command not allowed: {verb!r}")
+    if verb == _SERVER_LIST:
+        if pid is not None:
+            raise ValueError(f"{verb} takes no pid")
+        text = f"{verb}\n"
+    else:
+        if type(pid) is not int or pid <= 0:
+            raise ValueError(f"{verb} needs a positive int pid, got {pid!r}")
+        text = f"{verb} {pid}\n"
     return run(
         [_BINARY],
-        input=command + "\n",
+        input=text,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=_TIMEOUT_S,
         env=dict(env),
     )
@@ -63,13 +76,13 @@ def _parse_pct(text: str) -> float | None:
     return None
 
 
-def _ask(command: str, run, env: Mapping[str, str]) -> str | None:
-    """stdout of a successful command, or None on non-zero exit / spawn failure / timeout."""
+def _ask(verb: str, pid: int | None, run, env: Mapping[str, str]) -> str | None:
+    """stdout of a successful command, or None on non-zero exit or any failure of ``run``."""
     try:
-        r = _send(command, run, env)
-    except (OSError, subprocess.SubprocessError):
+        r = _send(verb, pid, run, env)
+        return (r.stdout or "") if r.returncode == 0 else None
+    except Exception:  # noqa: BLE001 - query must never raise
         return None
-    return (r.stdout or "") if r.returncode == 0 else None
 
 
 def query(pipe_dir: str | None = None, run=subprocess.run, environ=None) -> MpsStatus:
@@ -77,20 +90,20 @@ def query(pipe_dir: str | None = None, run=subprocess.run, environ=None) -> MpsS
     if pipe_dir is not None:
         env[_PIPE_ENV] = pipe_dir
 
-    out = _ask("get_server_list", run, env)
+    out = _ask(_SERVER_LIST, None, run, env)
     if out is None:
         return MpsStatus(False, [], [], None)
     servers = parse_pid_list(out)  # may be empty: daemon up, no server yet
 
     clients: list[int] = []
     for pid in servers:
-        text = _ask(f"get_client_list {int(pid)}", run, env)
+        text = _ask("get_client_list", pid, run, env)
         for c in parse_pid_list(text or ""):
             if c not in clients:
                 clients.append(c)
 
     pct = None
     if servers:
-        text = _ask(f"get_active_thread_percentage {int(servers[0])}", run, env)
+        text = _ask("get_active_thread_percentage", servers[0], run, env)
         pct = _parse_pct(text or "")
     return MpsStatus(True, servers, clients, pct)

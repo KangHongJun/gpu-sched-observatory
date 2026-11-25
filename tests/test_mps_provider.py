@@ -1,3 +1,4 @@
+import re
 import subprocess
 from pathlib import Path
 
@@ -12,27 +13,33 @@ CLIENT_TXT = (FIX / "mps_client_list.txt").read_text()
 EMPTY_TXT = (FIX / "mps_server_list_empty.txt").read_text()
 SERVER = int(SERVER_TXT.strip())
 CLIENTS = [int(x) for x in CLIENT_TXT.split()]
-ALLOWED = ("get_server_list", "get_client_list", "get_active_thread_percentage")
 
-ALL_RUNS: list = []
+_STDIN_OK = re.compile(
+    r"(get_server_list|get_client_list [1-9][0-9]*|get_active_thread_percentage [1-9][0-9]*)\n"
+)
 
 
 def scripted(replies):
-    """replies: callable(command) -> (returncode, stdout) | Exception, or a list consumed in order."""
+    """Fake subprocess.run. Enforces the read-only guarantee on EVERY call, in every test:
+    bare argv, stdin is exactly one allowed command line, a timeout is given.
+
+    replies: callable(command_without_newline) -> (returncode, stdout) | exception."""
 
     def run(argv, *args, **kwargs):
+        assert argv == ["nvidia-cuda-mps-control"], argv
+        assert not args
+        assert _STDIN_OK.fullmatch(kwargs["input"]), repr(kwargs["input"])
+        assert kwargs.get("timeout"), kwargs
         run.argvs.append(list(argv))
         run.kwargs.append(kwargs)
-        cmd = kwargs["input"].strip()
-        run.commands.append(cmd)
-        r = replies(cmd) if callable(replies) else replies[len(run.commands) - 1]
+        run.commands.append(kwargs["input"])
+        r = replies(kwargs["input"][:-1])
         if isinstance(r, BaseException) or (isinstance(r, type) and issubclass(r, BaseException)):
             raise r() if isinstance(r, type) else r
         rc, out = r
         return subprocess.CompletedProcess(argv, rc, out, "")
 
     run.argvs, run.kwargs, run.commands = [], [], []
-    ALL_RUNS.append(run)
     return run
 
 
@@ -54,35 +61,66 @@ def test_parse_ignores_noise_and_dedups():
     assert parse_pid_list("\n  12  \n\n12 34\npid 12\n7\n12\n") == [12, 7]
 
 
+def test_parse_ignores_zero():
+    assert parse_pid_list("0\n00\n5\n") == [5]
+
+
 def test_happy_path():
     run = scripted(happy)
     st = query(run=run)
     assert st == MpsStatus(True, [SERVER], CLIENTS, 100.0)
     assert run.commands == [
-        "get_server_list",
-        f"get_client_list {SERVER}",
-        f"get_active_thread_percentage {SERVER}",
+        "get_server_list\n",
+        f"get_client_list {SERVER}\n",
+        f"get_active_thread_percentage {SERVER}\n",
     ]
-    assert all(a == ["nvidia-cuda-mps-control"] for a in run.argvs)
 
 
 def test_no_daemon():
     run = scripted(lambda c: (1, EMPTY_TXT))
     assert query(run=run) == MpsStatus(False, [], [], None)
-    assert run.commands == ["get_server_list"]
+    assert run.commands == ["get_server_list\n"]
 
 
-@pytest.mark.parametrize("exc", [FileNotFoundError("x"), subprocess.TimeoutExpired("c", 5), OSError("x")])
+@pytest.mark.parametrize(
+    "exc",
+    [
+        FileNotFoundError("x"),
+        subprocess.TimeoutExpired("c", 5),
+        OSError("x"),
+        PermissionError("x"),
+        ValueError("embedded null byte"),
+        TypeError("bad env"),
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"),
+    ],
+)
 def test_exceptions_inactive(exc):
     run = scripted(lambda c: exc)
     assert query(run=run) == MpsStatus(False, [], [], None)
-    assert run.commands == ["get_server_list"]
+    assert run.commands == ["get_server_list\n"]
+
+
+def test_exception_on_later_commands_tolerated():
+    def r(cmd):
+        if cmd == "get_server_list":
+            return 0, SERVER_TXT
+        return ValueError("boom")
+
+    st = query(run=scripted(r))
+    assert st == MpsStatus(True, [SERVER], [], None)
+
+
+def test_stdout_none_handled():
+    st = query(run=scripted(lambda c: (0, None)))
+    assert st == MpsStatus(True, [], [], None)
+    st = query(run=scripted(lambda c: (0, SERVER_TXT) if c == "get_server_list" else (0, None)))
+    assert st == MpsStatus(True, [SERVER], [], None)
 
 
 def test_daemon_without_server():
     run = scripted(lambda c: (0, ""))
     assert query(run=run) == MpsStatus(True, [], [], None)
-    assert run.commands == ["get_server_list"]
+    assert run.commands == ["get_server_list\n"]
 
 
 def test_two_servers():
@@ -98,7 +136,7 @@ def test_two_servers():
     run = scripted(r)
     assert query(run=run) == MpsStatus(True, [11, 22], [1, 2, 3], 50.0)
     pct = [c for c in run.commands if c.startswith("get_active")]
-    assert pct == ["get_active_thread_percentage 11"]
+    assert pct == ["get_active_thread_percentage 11\n"]
 
 
 def test_client_list_failure_tolerated():
@@ -120,8 +158,7 @@ def test_bad_percentage(out):
     def r(cmd):
         return happy(cmd) if not cmd.startswith("get_active") else (0, out)
 
-    run = scripted(r)
-    st = query(run=run)
+    st = query(run=scripted(r))
     assert st.active and st.thread_pct is None
     assert st.client_pids == CLIENTS
 
@@ -134,6 +171,7 @@ def test_pipe_dir_env():
         assert kw["env"]["CUDA_MPS_PIPE_DIRECTORY"] == "/tmp/x"
         assert kw["env"]["A"] == "1"
         assert kw["timeout"] == 5
+        assert kw["encoding"] == "utf-8" and kw["errors"] == "replace"
     assert env == {"A": "1"}
 
 
@@ -144,21 +182,36 @@ def test_no_pipe_dir_passthrough():
         assert "CUDA_MPS_PIPE_DIRECTORY" not in kw["env"]
 
 
-def test_send_rejects_disallowed():
-    run = scripted(happy)
-    for bad in ("quit", "start_server -uid 0", "set_default_active_thread_percentage 50"):
-        with pytest.raises(ValueError):
-            mps._send(bad, run, {})
-    assert run.commands == []
+@pytest.mark.parametrize(
+    "verb,pid",
+    [
+        ("quit", None),
+        ("start_server", None),
+        ("set_default_active_thread_percentage", 50),
+        ("get_server_list quit", None),
+        ("get_client_list\nquit", 5),
+        (" get_server_list", None),
+        ("get_server_list", 5),
+        ("get_client_list", None),
+        ("get_client_list", "5"),
+        ("get_client_list", True),
+        ("get_client_list", 0),
+        ("get_client_list", -1),
+        ("get_active_thread_percentage", None),
+    ],
+)
+def test_send_rejects_invalid(verb, pid):
+    calls = []
+    with pytest.raises(ValueError):
+        mps._send(verb, pid, lambda *a, **k: calls.append(a), {})
+    assert calls == []
 
 
-def test_only_allowed_commands_sent_across_scenarios():
-    assert ALL_RUNS
-    for run in ALL_RUNS:
-        for argv in run.argvs:
-            assert argv == ["nvidia-cuda-mps-control"]
-        for c in run.commands:
-            assert c.split()[0] in ALLOWED
+def test_send_builds_exact_stdin():
+    run = scripted(lambda c: (0, ""))
+    mps._send("get_client_list", 5, run, {})
+    mps._send("get_server_list", None, run, {})
+    assert run.commands == ["get_client_list 5\n", "get_server_list\n"]
 
 
 def test_static_no_forbidden_words():
