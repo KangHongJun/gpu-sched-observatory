@@ -13,16 +13,34 @@ LOG="$BASE/log"
 CTL="${NVIDIA_MPS_CONTROL:-nvidia-cuda-mps-control}"
 
 ours() { CUDA_MPS_PIPE_DIRECTORY="$PIPE" CUDA_MPS_LOG_DIRECTORY="$LOG" "$@"; }
-mine() { pgrep -u "$(id -u)" -a nvidia-cuda-mps || true; }
+# pgrep의 기본 매칭은 15자로 잘린 comm("nvidia-cuda-mps")이라 "nvidia-cuda-mps-control"로는 아무것도 못 찾는다.
+# 그래서 comm 형태와 전체 명령줄 형태를 둘 다 본다(오탐은 허용, 누락은 불허).
+CMDRE='(^|/)nvidia-cuda-mps-(control|server)( |$)'
+# 모든 사용자의 MPS 제어 데몬/서버 (pid와 명령줄)
+any_mps() { { pgrep -a -x nvidia-cuda-mps; pgrep -a -f "$CMDRE"; } 2>/dev/null | sort -u || true; }
+# 이 사용자의 MPS 프로세스
+mine() { { pgrep -u "$(id -u)" -a -x nvidia-cuda-mps; pgrep -u "$(id -u)" -a -f "$CMDRE"; } 2>/dev/null | sort -u || true; }
+
+# BASE는 mode 700, 현재 사용자 소유 디렉터리여야 하고 심볼릭 링크면 거부한다.
+prepare_base() {
+  if [ -L "$BASE" ] || { [ -e "$BASE" ] && { [ ! -d "$BASE" ] || [ ! -O "$BASE" ]; }; }; then
+    echo "refuse: $BASE exists but is a symlink or not a directory owned by this user" >&2
+    exit 1
+  fi
+  mkdir -p -m 700 "$BASE"
+  chmod 700 "$BASE"
+  mkdir -p "$PIPE" "$LOG"
+}
 
 case "${1:-}" in
   start)
-    if pgrep -a nvidia-cuda-mps-control >/dev/null; then
-      echo "refuse: nvidia-cuda-mps-control already running:" >&2
-      pgrep -a nvidia-cuda-mps-control >&2
+    existing="$(any_mps)"
+    if [ -n "$existing" ]; then
+      echo "refuse: an MPS control daemon or server already exists on this machine:" >&2
+      echo "$existing" >&2
       exit 1
     fi
-    mkdir -p "$PIPE" "$LOG"
+    prepare_base
     # 데몬은 GPU 1만 볼 수 있다.
     CUDA_VISIBLE_DEVICES=1 CUDA_MPS_PIPE_DIRECTORY="$PIPE" CUDA_MPS_LOG_DIRECTORY="$LOG" "$CTL" -d
     sleep 1

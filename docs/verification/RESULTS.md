@@ -9,7 +9,7 @@
 | G1 | A5000에서 DCGM 1001~1005가 나오는가 | Live에 5개 막대 표시 | 해당 필드는 `N/A`, Live는 NVML 중심 | 통과: 1001~1005 전부 지원되고 0이 아닌 값이 관측됨(1004는 FP16 행렬곱 부하에서 0.951~0.959, small_kernels에서는 0.000). 1006만 미지원 |
 | G2 | nsys가 외부 프로세스의 Context 전환을 PID와 함께 잡는가 | 3주차를 nsys 캡처로 진행 | 3주차를 "직접 띄운 프로세스의 커널 타임라인"으로 축소 | **잠정: 통과(비루트 기준).** nsys 2026.6.1이 sudo 없이, 대상 프로세스를 띄우지 않고도 외부 워크로드 A/B의 GPU 컨텍스트 전환 이벤트를 PID와 함께 기록했다. root 실행과의 차이(특히 타 사용자 프로세스의 PID 마스킹)는 미확인: 아래 "사용자 실행 대기" 참고 |
 | G3 | SQLite export에서 전환·커널 테이블을 읽을 수 있는가 | Task 18을 실제 스키마로 구현 | nsys의 다른 export 형식(json)을 검토 | **통과(캡처 방식별로 범위가 다름, 비루트 기준).** 전역 캡처의 SQLite에서 컨텍스트 전환(`GPU_CONTEXT_SWITCH_EVENTS`)을 PID·GPU별로 읽을 수 있고, 직접 띄운 캡처의 SQLite에서 커널(`CUPTI_ACTIVITY_KIND_KERNEL`)을 읽을 수 있다. 한 파일에서 둘을 함께 얻는 것은 이번 캡처로는 안 된다. 전환 이벤트에서 만드는 구간은 두 구성(`restore_save` 41%, `hold` 약 100%)이 가능하고 데이터는 어느 쪽이 "실행 중"인지 정하지 못한다. 명세의 제출~실행 시작 시간은 얻을 수 없고(커널 테이블에 `start`/`end`뿐), API 호출 시작~커널 시작만 얻는다. 상세: `nsys-schema.md` |
-| G4 | MPS ON에서 전환 이벤트와 커널 중첩이 어떻게 달라지는가 | 결과대로 표시 규칙 확정 | 전환은 `N/A`, overlap과 앱 성능 우선 | **잠정: `N/A` 쪽(비루트 기준).** MPS ON에서 클라이언트 2개를 돌린 10초 전역 캡처의 GPU 1에 컨텍스트 전환 이벤트가 0건이었다(OFF는 205,545건). 프로세스당 처리량은 약 5,660 -> 약 49,800~54,400 iter/s. 표시 규칙은 아래 Task 6 절. root 캡처로는 같은지 미확인: 아래 "사용자 실행 대기" 참고 |
+| G4 | MPS ON에서 전환 이벤트와 커널 중첩이 어떻게 달라지는가 | 결과대로 표시 규칙 확정 | 전환은 `N/A`, overlap과 앱 성능 우선 | **잠정: `N/A` 쪽(비루트 기준).** MPS ON에서 클라이언트 2개를 돌린 10초 전역 캡처의 GPU 1에 컨텍스트 전환 이벤트가 0건이었다(OFF는 205,545건). 프로세스당 처리량은 약 5,660 -> 약 49,800~54,400 iter/s(단일 검증 실행(OFF 1회, ON 1회), 반복 없음, 벤치마크 결과 아님). 두 MPS 클라이언트의 커널 겹침은 미확인(이 게이트의 전환 쪽 질문에만 답했다). 표시 규칙은 아래 Task 6 절. root 캡처로는 같은지 미확인: 아래 "사용자 실행 대기" 참고 |
 | G5 | CUPTI를 외부 프로세스에 붙일 수 있는가 | MVP 이후 collector 설계 입력 | MVP 이후 과제로만 기록 | 미정 |
 | G6 | 수집 오버헤드가 얼마인가 | README에 수치 기재 | 기본 수집 주기를 낮춘다 | 미정 |
 
@@ -214,12 +214,12 @@ for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 1 --du
 **판정: 잠정.** 비루트 전역 캡처에서 MPS ON의 GPU 1 컨텍스트 전환 이벤트는 클라이언트 2개가 돌 때 0건이었다(`raw/06_derive.txt`). root 캡처로도 같은지는 미확인이라 "사용자 실행 대기"에 두었다. 모든 수치는 같은 날, 같은 스크립트, 같은 워크로드(2프로세스, 30초, 캡처 10초)로 얻었다.
 
 ### 데몬과 명령
-- `scripts/verify/06_mps.sh start|stop|status|env`: 사용자 범위, `CUDA_VISIBLE_DEVICES=1`로 GPU 1 전용, pipe/log 디렉터리는 `/tmp/gso-mps-<uid>/` 아래. 시작 전에 이미 `nvidia-cuda-mps-control`이 있으면 거부한다. `stop`은 우리 pipe 디렉터리에만 `quit`을 보낸 뒤 이 사용자의 `nvidia-cuda-mps` 프로세스가 없는지 확인한다. 시작 전 MPS 프로세스 없음, GPU 1 유휴(0%, 1 MiB)를 확인했다. 시스템 기본 pipe 디렉터리, compute mode, sudo는 쓰지 않았다(compute mode는 전 GPU Default 그대로).
+- `scripts/verify/06_mps.sh start|stop|status|env`: 사용자 범위, `CUDA_VISIBLE_DEVICES=1`로 GPU 1 전용, pipe/log 디렉터리는 `/tmp/gso-mps-<uid>/` 아래. `start`는 어떤 사용자의 MPS 제어 데몬/서버든 이미 있으면 거부한다: 15자로 잘린 comm(`pgrep -x nvidia-cuda-mps`)과 전체 명령줄(`pgrep -f`, `nvidia-cuda-mps-(control|server)`)을 둘 다 검사한다(오탐은 허용). 처음 쓴 `pgrep nvidia-cuda-mps-control`은 comm이 15자로 잘려 실제 데몬을 못 찾는 것이 리뷰에서 확인되어 고쳤고, 실제 데몬 없이 이름만 같은 대역 프로세스로 거부 동작을 확인했다(`raw/06_fix1_guard.txt`). 첫 실행의 시작 전 확인(MPS 프로세스 없음)은 손으로 했다. `/tmp/gso-mps-<uid>`는 mode 700으로 만들고, 심볼릭 링크이거나 현재 사용자 소유 디렉터리가 아니면 거부한다. `stop`은 우리 pipe 디렉터리에만 `quit`을 보낸 뒤 이 사용자의 `nvidia-cuda-mps` 프로세스가 없는지 확인한다. 시작 전 MPS 프로세스 없음, GPU 1 유휴(0%, 1 MiB)를 확인했다. 시스템 기본 pipe 디렉터리, compute mode, sudo는 쓰지 않았다(compute mode는 전 GPU Default 그대로).
 - MPS OFF: `small_kernels --gpu 1 --duration 30` 두 개(`raw/06_off_a.json`, `06_off_b.json`)를 띄우고 14초 뒤 `capture ctx_mps_off 10`, `export ctx_mps_off`.
 - MPS ON: `eval "$(scripts/verify/06_mps.sh env)"` 뒤 `small_kernels --gpu 0 --duration 30` 두 개(`raw/06_on_a.json`, `06_on_b.json`)를 띄우고 12초 뒤 `nvidia-smi`와 `get_*` 명령을 실행, 이어서 `capture ctx_mps_on 10`, `export ctx_mps_on`.
 
 ### 클라이언트에서 보이는 GPU 인덱스 (워크로드 `--gpu` 값)
-- 데몬을 `CUDA_VISIBLE_DEVICES=1`로 띄우면 클라이언트에게 보이는 장치는 1개이고 번호는 **0**이다. 클라이언트 환경이 `CUDA_VISIBLE_DEVICES=1`이면 CUDA 초기화가 실패한다: torch는 "No CUDA GPUs are available"(`raw/06_client_index.txt`), MPS 서버 로그는 "Client requested 1 which is not a valid GPU ID in the MPS visible set of devices ... less than 1 or consider using UUIDs"(`raw/06_mps_server.log`). GPU UUID를 주면 장치 1개(`count 1`)로 열리고 PCI 버스 171(=0xAB, nvidia-smi GPU 1)이었다(터미널 출력만 확인, 원본 파일은 저장하지 않음).
+- 데몬을 `CUDA_VISIBLE_DEVICES=1`로 띄우면 클라이언트에게 보이는 장치는 1개이고 번호는 **0**이다. 클라이언트 환경이 `CUDA_VISIBLE_DEVICES=1`이면 CUDA 초기화가 실패한다: torch는 "No CUDA GPUs are available"(`raw/06_client_index.txt`), MPS 서버 로그는 "Client requested 1 which is not a valid GPU ID in the MPS visible set of devices ... less than 1 or consider using UUIDs"(`raw/06_mps_server.log`). GPU UUID를 주면 장치 1개(`count 1`)로 열리고 PCI 버스 171(=0xAB, nvidia-smi GPU 1)이었다. 이 장치 수/버스 출력은 터미널에서만 확인했고 저장하지 않았다. 같은 실행 중의 `nvidia-smi`는 `raw/06_smi_probe_uuid.txt`에 있고 GPU 1에 `M+C` 클라이언트가 보인다.
 - `select_gpu(N)`은 프로세스 안에서 `CUDA_VISIBLE_DEVICES=N`을 덮어쓴다. 따라서 **MPS ON에서는 `--gpu 0`이 호스트 GPU 1에서 돈다**(`raw/06_probe_gpu0.json`, `06_smi_probe_gpu0arg.txt`: 해당 프로세스가 GPU 1 항목에만 `M+C`로 보이고 GPU 0 항목에는 없음). `--gpu 1`은 실패한다. 커밋된 워크로드 코드는 바꾸지 않았다. 호스트 번호를 그대로 넘기는 MPS 벤치 러너는 이 호환 문제를 처리해야 한다(`--gpu` 값을 MPS ON일 때 0으로 매핑하거나 `select_gpu`가 이미 설정된 `CUDA_VISIBLE_DEVICES`를 존중하게 하는 둘 중 하나 필요. 어느 쪽인지는 미결정).
 - nsys 쪽: 클라이언트를 nsys로 띄운 캡처의 `TARGET_INFO_CUDA_DEVICE`는 `cudaId=0`이 `gpuId=1`로 대응했다(`raw/06_look_launched1.txt`). 전역 캡처의 `gpuId`는 OFF/ON 모두 nvidia-smi 인덱스와 같은 쪽으로 읽혔다(GPU 1에 우리 이벤트, GPU 0에 다른 사용자 이벤트).
 
@@ -230,6 +230,8 @@ for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 1 --du
 - 데몬이 없을 때: `tests/fixtures/mps_server_list_empty.txt`에 `Cannot find MPS control daemon process` 한 줄(우리 pipe 디렉터리, stdout+stderr), 종료 코드 1. 데몬이 떠 있을 때 명령의 종료 코드는 0이다.
 
 ### OFF 대비 ON (같은 캡처 창 `[0, w1]`, GPU 1)
+
+**단일 검증 실행(OFF 1회, ON 1회), 반복 없음, 벤치마크 결과 아님.**
 
 | 항목 | MPS OFF (`ctx_mps_off`) | MPS ON (`ctx_mps_on`) |
 |---|---|---|
