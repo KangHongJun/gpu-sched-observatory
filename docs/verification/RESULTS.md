@@ -7,11 +7,42 @@
 | 게이트 | 질문 | 통과 시 | 실패 시 | 판정 |
 |---|---|---|---|---|
 | G1 | A5000에서 DCGM 1001~1005가 나오는가 | Live에 5개 막대 표시 | 해당 필드는 `N/A`, Live는 NVML 중심 | 통과: 1001~1005 전부 지원되고 0이 아닌 값이 관측됨(1004는 FP16 행렬곱 부하에서 0.951~0.959, small_kernels에서는 0.000). 1006만 미지원 |
-| G2 | nsys가 외부 프로세스의 Context 전환을 PID와 함께 잡는가 | 3주차를 nsys 캡처로 진행 | 3주차를 "직접 띄운 프로세스의 커널 타임라인"으로 축소 | 미정 |
+| G2 | nsys가 외부 프로세스의 Context 전환을 PID와 함께 잡는가 | 3주차를 nsys 캡처로 진행 | 3주차를 "직접 띄운 프로세스의 커널 타임라인"으로 축소 | **잠정: 통과(비루트 기준).** nsys 2026.6.1이 sudo 없이, 대상 프로세스를 띄우지 않고도 외부 워크로드 A/B의 GPU 컨텍스트 전환 이벤트를 PID와 함께 기록했다. root 실행과의 차이(특히 타 사용자 프로세스의 PID 마스킹)는 미확인: 아래 "사용자 실행 대기" 참고 |
 | G3 | SQLite export에서 전환·커널 테이블을 읽을 수 있는가 | Task 18을 실제 스키마로 구현 | nsys의 다른 export 형식(json)을 검토 | 미정 |
 | G4 | MPS ON에서 전환 이벤트와 커널 중첩이 어떻게 달라지는가 | 결과대로 표시 규칙 확정 | 전환은 `N/A`, overlap과 앱 성능 우선 | 미정 |
 | G5 | CUPTI를 외부 프로세스에 붙일 수 있는가 | MVP 이후 collector 설계 입력 | MVP 이후 과제로만 기록 | 미정 |
 | G6 | 수집 오버헤드가 얼마인가 | README에 수치 기재 | 기본 수집 주기를 낮춘다 | 미정 |
+
+## 사용자 실행 대기 (sudo)
+
+에이전트는 sudo를 쓸 수 없어 아래는 사용자가 직접 실행해야 한다.
+
+### Task 4 (G2): root 전역 캡처 `ctx_baseline`
+
+터미널 1 (nsys 밖에서 외부 워크로드 두 개, GPU 1, 60초):
+
+```bash
+cd <repo>
+for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 1 --duration 60 --out docs/verification/raw/04_wl_root_$n.json & done; wait
+```
+
+터미널 2 (워크로드가 돈 지 몇 초 뒤, 10초 캡처. sudo 환경에서 `$HOME`이 달라질 수 있어 NSYS를 명시한다):
+
+```bash
+cd <repo>
+NSYS="$HOME/opt/nsys/opt/nvidia/nsight-systems-cli/2026.6.1/target-linux-x64/nsys"
+sudo env NSYS="$NSYS" scripts/verify/04_nsys_ctxsw.sh capture ctx_baseline 10
+sudo chown "$USER" docs/verification/raw/ctx_baseline.nsys-rep
+scripts/verify/04_nsys_ctxsw.sh export ctx_baseline
+```
+
+- 생성되어야 하는 파일: `docs/verification/raw/ctx_baseline.nsys-rep`, `ctx_baseline.sqlite`.
+- 확인할 것 (비루트 `ctx_nonroot.sqlite`와 같은 질의로 비교):
+  1. `GPU_CONTEXT_SWITCH_EVENTS`의 GPU별(`gpuId`) 이벤트 수와 `globalPid` 종류 수. 비루트에서는 GPU 1에 워크로드 A/B 두 개, GPU 0에 `pid=0`으로 마스킹된 한 종류(3,357건)였다.
+  2. root에서 GPU 0 이벤트의 `globalPid`가 실제 PID로 풀리는지(마스킹 해제 여부).
+  3. 이벤트 태그 종류(비루트는 7, 8 두 종류뿐), 타임스탬프 정밀도(비루트는 ns 단위 상대 시각).
+  4. 워크로드 A/B 이벤트 수가 비루트와 비슷한지.
+- G2의 남은 질문: 타 사용자 프로세스 PID가 root에서만 보이는지. 이것은 비루트 데이터만으로는 답할 수 없다. 단 워크로드 A/B(같은 사용자)에 대한 판정은 비루트로 이미 얻었다.
 
 ## Task 1: 프로젝트 스캐폴드와 검증 기록 틀
 
@@ -90,7 +121,34 @@ for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 1 --du
 
 ## Task 4: nsys 전역 Context Switch 캡처 (G2)
 
-(결과 없음)
+**판정: 잠정.** 비루트로 외부 프로세스의 컨텍스트 전환 이벤트가 PID와 함께 캡처됐다. root 실행은 사용자 몫이라 "사용자 실행 대기" 절에 두었고, 그 결과가 나올 때까지 확정하지 않는다.
+
+### 설치와 명령
+- 패키지 `nsight-systems-cli-2026.6.1`, 버전 문자열 `2026.6.1.251-266139333969v0`. NVIDIA devtools 저장소(ubuntu2204/amd64)의 `Packages` 색인에서 가장 새 항목(같은 2026.6.1에 빌드 218과 251이 있어 251)을 골랐고 SHA256이 색인과 일치함을 확인했다. `dpkg -x`로 `~/opt/nsys`에 풀었다(apt/루트 없음, 누락 공유 라이브러리 없음). 바이너리: `~/opt/nsys/opt/nvidia/nsight-systems-cli/2026.6.1/target-linux-x64/nsys`.
+- 이 버전의 옵션 철자는 `--gpuctxsw=true`, `--sample=none`, `--cpuctxsw=none`, `--duration`, `-o`, `--force-overwrite=true`이다(`nsys profile --help`). `perf_event_paranoid=4`라 CPU 샘플링과 OS 스레드 추적은 끄고 GPU 컨텍스트 전환만 본다.
+- 스크립트: `scripts/verify/04_nsys_ctxsw.sh capture <name> [duration]`, `export <name>`. 대상 명령은 `TARGET` 환경 변수, 기본은 `sleep <duration>`. nsys는 대상 명령 없이는 실행하지 않아 `sleep`을 대상으로 했다(프로그램 자체의 GPU 활동 없음).
+
+### 캡처 1: 비루트, 전역, 외부 워크로드 (`ctx_nonroot`)
+- 워크로드 A/B(`small_kernels --gpu 1 --duration 60`, 2프로세스)를 nsys 밖에서 먼저 띄우고 15초 뒤 `capture ctx_nonroot 10`. 성공(종료 코드 0, `.nsys-rep` 4.1 MB, export 200,089 events). 워크로드 원본: `raw/04_wl_a.json`, `04_wl_b.json`.
+- 테이블: `GPU_CONTEXT_SWITCH_EVENTS` 197,949행이 있다. `CUPTI_ACTIVITY_KIND_*`(커널/런타임) 테이블은 **없다**(외부 프로세스의 CUDA 커널은 기록되지 않음). 전체 테이블 목록: `raw/04_sqlite_look_nonroot.txt`.
+- 열: `tag, vmId, seqNo, contextId, timestamp, globalPid, gpuId` (`raw/04_sqlite_look2_nonroot.txt`). `tag`는 `ENUM_GPU_CTX_SWITCH`의 값이며 이번 캡처에서는 7(SAVE_END)과 8(RESTORE_START)만 나왔다(각 약 99,000건).
+- GPU별 구분: 된다. `gpuId`가 이벤트에 있고 `TARGET_INFO_GPU`의 PCI 버스 ID로 nvidia-smi 인덱스와 일치한다(nsys gpuId 1 = nvidia-smi GPU 1; `raw/04_smi_bus.txt`). GPU 1: 194,592건, GPU 0: 3,357건, GPU 2: 0건. GPU 0 이벤트는 다른 사용자의 워크로드로 보이며 우리 것이 아니다.
+- PID 식별: **된다.** GPU 1 이벤트의 `globalPid`는 정확히 두 종류이고, `(globalPid >> 24) & 0xFFFFFF`가 워크로드 A/B의 PID(워크로드 JSON의 `pid`)와 각각 일치한다. `PROCESSES` 테이블(`globalPid`, `pid`, `name`)에도 두 PID가 있다(`raw/04_sqlite_look3_nonroot.txt`, `04_sqlite_look4_nonroot.txt`). 이 디코딩은 관측에서 맞춘 것이며 공식 문서로 확인하지 않았다.
+- A/B 이벤트 수: 각각 약 97,000건(A 97,299, B 97,293). 10초 캡처에서 GPU 1 전체 194,592건. 시간순으로 A의 7,8 다음 B의 8,7이 번갈아 나온다(첫 12건 확인). `contextId`도 프로세스별로 하나씩이다.
+- 마스킹: GPU 0의 다른 사용자 프로세스는 `globalPid`가 `1<<48`(PID 필드 0) 한 종류로만 나온다(3,357건, contextId 0). 같은 사용자의 워크로드는 마스킹되지 않았다. 다른 사용자 프로세스가 여러 개여도 하나로 합쳐 보이는지는 별도 확인하지 않았다(GPU 0 `nvidia-smi`에는 여러 PID가 있었다).
+- 타임스탬프: 정수, 캡처 시작 기준 ns로 보인다(최소 259,841, 최대 약 10.117e9로 10초 캡처와 일치). 워크로드 A/B 교대 주기는 약 177 µs(첫 이벤트 쌍들의 간격에서). 2-process 시 p50 지연 0.166 ms(Task 2)와 같은 크기다.
+- 부수 관찰: `PROCESSES` 테이블에 시스템 전체 2,110개 프로세스(이름 포함)가 들어간다. 캡처 파일은 반드시 git 밖(`raw/`)에만 둔다.
+
+### 캡처 2: 비루트, nsys가 직접 띄운 대상 (`ctx_launched`)
+- `TARGET="uv run python -m gso.bench.workloads.small_kernels --gpu 1 --duration 12 ..." capture ctx_launched 15` (워크로드 1개, 기본 trace 옵션 유지). 성공, `.nsys-rep` 42.6 MB.
+- `CUPTI_ACTIVITY_KIND_KERNEL` 435,120행, `CUPTI_ACTIVITY_KIND_RUNTIME` 1,306,317행. 커널의 `globalPid`는 모두 대상 프로세스의 PID와 일치하고 `deviceId`는 전부 0이다(`gpuId`/GPU 번호와 어떻게 대응하는지는 이번에 확인하지 않았다: 미확인).
+- 컨텍스트 전환: GPU 1 3건, GPU 0 4건뿐이다(`GPU_CONTEXT_SWITCH_EVENTS` 7행). 대상이 혼자라 전환이 거의 없는 것과 일치하지만 원인은 검증하지 않았다. 따라서 폴백(직접 띄운 프로세스의 커널 타임라인)은 비루트로 동작하며, 그 경우 2-process 경합 전환은 이 한 번의 캡처로는 보이지 않는다.
+- 원본: `raw/ctx_launched.*`, `raw/04_sqlite_look_launched.txt`.
+
+### 미확인
+- root 캡처(`ctx_baseline`)와 비루트의 차이, 특히 타 사용자 프로세스의 PID 마스킹 해제 여부: 사용자 실행 대기.
+- 7/8 외 태그가 부하 조건에서 나오는지, 전환 간격의 분포, MPS 상태에서의 거동(Task 6).
+- 캡처 오버헤드가 워크로드에 미친 영향(G6, Task 8).
 
 ## Task 5: SQLite 스키마 기록과 fixture (G3)
 
