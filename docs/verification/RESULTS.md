@@ -19,7 +19,25 @@
 
 ## Task 2: 2-process 재현 워크로드
 
-(결과 없음)
+명령 (GPU 1 전용, `--size` 기본 256, 워밍업 10회 제외):
+
+```bash
+# 단독
+uv run python -m gso.bench.workloads.small_kernels --gpu 1 --duration 20 --out docs/verification/raw/small_single.json
+# 2-process 동시
+for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 1 --duration 20 --out docs/verification/raw/small_$n.json & done; wait
+```
+
+| 실행 | throughput (iter/s) | p50 (ms) | p95 (ms) | p99 (ms) |
+|---|---|---|---|---|
+| 단독 | 53,792 | 0.0171 | 0.0220 | 0.0269 |
+| 2-process, 프로세스 a | 6,029 | 0.1662 | 0.1670 | 0.1830 |
+| 2-process, 프로세스 b | 6,033 | 0.1661 | 0.1671 | 0.1830 |
+
+- 처리량 변화: 프로세스당 53,792 -> 약 6,030 iter/s (단독 대비 약 11.2%, 약 -89%). 두 프로세스 합계는 약 12,060 iter/s로 단독의 약 22%.
+- p50 지연은 0.0171 ms -> 0.166 ms로 약 9.7배 늘었다. 동시 실행 중 GPU 1 사용률은 99%였고 nvidia-smi에 두 프로세스가 GPU 1 컨텍스트로 보였다.
+- 두 프로세스의 수치가 거의 같아, 시분할이 대칭적으로 일어난 것으로 보인다. 원인(Context 전환 여부)은 이후 Task의 nsys 캡처로 확인한다.
+- 원본 JSON은 `docs/verification/raw/`(git 제외)에 있다.
 
 ## Task 3: DCGM 필드 지원 확인 (G1)
 
