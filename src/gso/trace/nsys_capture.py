@@ -29,6 +29,7 @@ MAX_DURATION_S = 10
 PROFILE_TIMEOUT_MARGIN_S = 60
 EXPORT_TIMEOUT_S = 120
 _TAIL_LINES = 5
+_SIGTERM_EXIT = 143  # 128 + SIGTERM
 _NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
 
@@ -143,14 +144,14 @@ def _validate_name(name: str) -> None:
         raise ValueError(f"name must be a plain file stem (letters, digits, - _ .), got {name!r}")
 
 
-def _exec(run, argv, timeout, env, what: str, tail_note: str = ""):
+def _exec(run, argv, timeout, env, what: str, ok_codes=(0,)):
     try:
         res = run(argv, capture_output=True, text=True, timeout=timeout, env=env, errors="replace")
     except subprocess.TimeoutExpired as e:
         raise CaptureError(f"nsys {what} 시간 초과 (timeout {timeout}s)") from e
     except OSError as e:
         raise CaptureError(f"nsys {what} 실행 실패: {e}") from e
-    if res.returncode != 0:
+    if res.returncode not in ok_codes:
         raise CaptureError(
             f"nsys {what} 실패 (exit code {res.returncode}):\n{_tail(res.stdout, res.stderr)}"
         )
@@ -194,8 +195,17 @@ def capture(
     started_ns = clock_ns()
     t0 = time.monotonic()
     try:
-        _exec(run, profile_argv, duration_s + PROFILE_TIMEOUT_MARGIN_S, env, "profile")
+        # 실측(nsys 2026.6.1): 직접 띄운 대상이 --duration보다 오래 살면 nsys가 기간이 끝날 때
+        # 대상을 SIGTERM으로 끝내고 보고서는 정상 생성하며 종료 코드 143으로 끝난다.
+        # 보고서가 있을 때만 이 코드를 성공으로 본다(전역 모드의 `sleep`은 해당 없음).
+        ok = (0, _SIGTERM_EXIT) if target is not None else (0,)
+        prof = _exec(run, profile_argv, duration_s + PROFILE_TIMEOUT_MARGIN_S, env, "profile", ok)
         if not rep.is_file():
+            if prof.returncode != 0:
+                raise CaptureError(
+                    f"nsys profile 실패 (exit code {prof.returncode}), no {rep.name}:\n"
+                    f"{_tail(prof.stdout, prof.stderr)}"
+                )
             raise CaptureError(f"nsys profile exited 0 but produced no {rep.name}")
         _exec(run, export_argv, EXPORT_TIMEOUT_S, None, "export")
         if not sqlite.is_file():
@@ -214,6 +224,11 @@ def capture(
         mode = "global"
     else:
         warnings.append("컨텍스트 전환 이벤트는 직접 실행한 프로세스 주변에서만 기록됩니다.")
+        if prof.returncode == _SIGTERM_EXIT:
+            warnings.append(
+                "대상이 캡처 시간보다 오래 실행되어 nsys가 기간 끝에 종료시켰습니다."
+                " 대상의 자체 결과 파일은 만들어지지 않을 수 있습니다."
+            )
         mode = "launched"
     return CaptureResult(
         sqlite_path=sqlite,

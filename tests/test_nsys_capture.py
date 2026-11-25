@@ -281,3 +281,36 @@ def test_group_runner_returns_completed_process():
         capture_output=True, text=True, timeout=5, env=None,
     )
     assert (r.returncode, r.stdout.strip(), r.stderr.strip()) == (4, "out", "err")
+
+
+# --- launched target outliving the duration ------------------------------
+def test_launched_target_stopped_by_nsys_is_success_with_warning(tmp_path):
+    """nsys가 --duration 끝에 대상을 SIGTERM으로 끝내면 종료 코드 143이지만 보고서는 정상이다."""
+    run = fake_run(
+        results=[(143, "Generated: l.nsys-rep", ""), (0, "", "")],
+        on_call=touch_outputs(tmp_path, "l"),
+    )
+    res = capture(5, tmp_path, caps(root=True), run=run, name="l", target=["w"])
+    assert res.mode == "launched"
+    assert len(run.argvs) == 2
+    assert any("대상" in w and "종료" in w for w in res.warnings)
+
+
+def test_exit_143_in_global_mode_is_still_an_error(tmp_path):
+    run = fake_run(results=[(143, "", "x")], on_call=touch_outputs(tmp_path))
+    with pytest.raises(CaptureError, match="143"):
+        capture(5, tmp_path, caps(), run=run)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_launched_exit_143_without_rep_is_an_error(tmp_path):
+    run = fake_run(results=[(143, "", "x")])
+    with pytest.raises(CaptureError, match="143"):
+        capture(5, tmp_path, caps(), run=run, target=["w"])
+
+
+def test_launched_other_nonzero_exit_is_an_error(tmp_path):
+    run = fake_run(results=[(1, "", "bad")], on_call=touch_outputs(tmp_path))
+    with pytest.raises(CaptureError, match="bad"):
+        capture(5, tmp_path, caps(), run=run, target=["w"])
+    assert list(tmp_path.iterdir()) == []
