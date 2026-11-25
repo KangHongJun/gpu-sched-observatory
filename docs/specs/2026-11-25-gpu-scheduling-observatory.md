@@ -188,7 +188,7 @@ tegrastats
 - [ ] CUPTI standalone/late attach/launch injection 범위 확인
 - [ ] MPS OFF/ON에서 Context 및 커널 이벤트 수집 차이 확인
 - [ ] Collector의 수집 지연, 유실률 및 워크로드 오버헤드 측정
-- [ ] Jetson에서 지원되는 metric 및 권한 확인
+- [ ] Jetson에서 지원되는 metric 및 권한 확인 (MVP 범위 밖, 미검증)
 
 DCGM과 개발 프로파일러의 카운터 충돌 시 `dcgmi profile --pause` / `--resume`을 검토한다. 최신 문서 기준 host engine 전체에 영향을 주므로 공유 서버에서는 임의 실행하지 않는다.
 
