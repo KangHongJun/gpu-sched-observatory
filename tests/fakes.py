@@ -201,15 +201,26 @@ class FakeNvml:
         ]
 
 
-def fake_run(returncode=0, stdout="", stderr="", raises=None):
-    """subprocess.run 호환 호출 가능 객체. 호출된 argv를 .argvs 에 기록한다."""
+def fake_run(returncode=0, stdout="", stderr="", raises=None, results=None, on_call=None):
+    """subprocess.run 호환 호출 가능 객체. 호출된 argv를 .argvs 에 기록한다.
+
+    results: 호출 순서별 (returncode, stdout, stderr) 목록. 다 쓰면 마지막 항목을 반복한다.
+             생략하면 모든 호출이 returncode/stdout/stderr 를 돌려준다.
+    on_call: on_call(argv, index) 부수효과(예: 출력 파일 생성). raises 보다 먼저 실행된다.
+    """
 
     def run(argv, *args, **kwargs):
+        index = len(run.argvs)
         run.argvs.append(list(argv))
         run.kwargs.append(kwargs)
+        if on_call is not None:
+            on_call(list(argv), index)
         if raises is not None:
             raise raises() if isinstance(raises, type) else raises
-        return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+        rc, out, err = (
+            results[min(index, len(results) - 1)] if results else (returncode, stdout, stderr)
+        )
+        return subprocess.CompletedProcess(argv, rc, out, err)
 
     run.argvs = []
     run.kwargs = []
