@@ -9,7 +9,7 @@
 | G1 | A5000에서 DCGM 1001~1005가 나오는가 | Live에 5개 막대 표시 | 해당 필드는 `N/A`, Live는 NVML 중심 | 통과: 1001~1005 전부 지원되고 0이 아닌 값이 관측됨(1004는 FP16 행렬곱 부하에서 0.951~0.959, small_kernels에서는 0.000). 1006만 미지원 |
 | G2 | nsys가 외부 프로세스의 Context 전환을 PID와 함께 잡는가 | 3주차를 nsys 캡처로 진행 | 3주차를 "직접 띄운 프로세스의 커널 타임라인"으로 축소 | **잠정: 통과(비루트 기준).** nsys 2026.6.1이 sudo 없이, 대상 프로세스를 띄우지 않고도 외부 워크로드 A/B의 GPU 컨텍스트 전환 이벤트를 PID와 함께 기록했다. root 실행과의 차이(특히 타 사용자 프로세스의 PID 마스킹)는 미확인: 아래 "사용자 실행 대기" 참고 |
 | G3 | SQLite export에서 전환·커널 테이블을 읽을 수 있는가 | Task 18을 실제 스키마로 구현 | nsys의 다른 export 형식(json)을 검토 | **통과(캡처 방식별로 범위가 다름, 비루트 기준).** 전역 캡처의 SQLite에서 컨텍스트 전환(`GPU_CONTEXT_SWITCH_EVENTS`)을 PID·GPU별로 읽을 수 있고, 직접 띄운 캡처의 SQLite에서 커널(`CUPTI_ACTIVITY_KIND_KERNEL`)을 읽을 수 있다. 한 파일에서 둘을 함께 얻는 것은 이번 캡처로는 안 된다. 전환 이벤트에서 만드는 구간은 두 구성(`restore_save` 41%, `hold` 약 100%)이 가능하고 데이터는 어느 쪽이 "실행 중"인지 정하지 못한다. 명세의 제출~실행 시작 시간은 얻을 수 없고(커널 테이블에 `start`/`end`뿐), API 호출 시작~커널 시작만 얻는다. 상세: `nsys-schema.md` |
-| G4 | MPS ON에서 전환 이벤트와 커널 중첩이 어떻게 달라지는가 | 결과대로 표시 규칙 확정 | 전환은 `N/A`, overlap과 앱 성능 우선 | 미정 |
+| G4 | MPS ON에서 전환 이벤트와 커널 중첩이 어떻게 달라지는가 | 결과대로 표시 규칙 확정 | 전환은 `N/A`, overlap과 앱 성능 우선 | **잠정: `N/A` 쪽(비루트 기준).** MPS ON에서 클라이언트 2개를 돌린 10초 전역 캡처의 GPU 1에 컨텍스트 전환 이벤트가 0건이었다(OFF는 205,545건). 프로세스당 처리량은 약 5,660 -> 약 49,800~54,400 iter/s. 표시 규칙은 아래 Task 6 절. root 캡처로는 같은지 미확인: 아래 "사용자 실행 대기" 참고 |
 | G5 | CUPTI를 외부 프로세스에 붙일 수 있는가 | MVP 이후 collector 설계 입력 | MVP 이후 과제로만 기록 | 미정 |
 | G6 | 수집 오버헤드가 얼마인가 | README에 수치 기재 | 기본 수집 주기를 낮춘다 | 미정 |
 
@@ -43,6 +43,38 @@ scripts/verify/04_nsys_ctxsw.sh export ctx_baseline
   3. 이벤트 태그 종류(비루트는 7, 8 두 종류뿐), 타임스탬프 정밀도(비루트는 ns 단위 상대 시각).
   4. 워크로드 A/B 이벤트 수가 비루트와 비슷한지.
 - G2의 남은 질문: 타 사용자 프로세스 PID가 root에서만 보이는지. 이것은 비루트 데이터만으로는 답할 수 없다. 단 워크로드 A/B(같은 사용자)에 대한 판정은 비루트로 이미 얻었다.
+
+### Task 6 (G4): root 전역 캡처 `ctx_mps_on_root` (MPS ON)
+
+비루트로는 MPS ON의 GPU 1 전환 이벤트가 0건이었다. root에서도 0건인지(root에서만 MPS 서버나 클라이언트 이벤트가 보이는지)는 비루트 데이터로 답할 수 없다. 데몬은 에이전트 스크립트로 사용자 범위(GPU 1 전용)로 띄우고, 캡처만 root로 한다.
+
+터미널 1 (데몬 시작과 클라이언트 두 개, 30초. 클라이언트 쪽 GPU 번호는 `--gpu 0`이다, Task 6 참고):
+
+```bash
+cd <repo>
+scripts/verify/06_mps.sh start
+eval "$(scripts/verify/06_mps.sh env)"
+for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 0 --duration 30 --out docs/verification/raw/06_root_on_$n.json & done; wait
+```
+
+터미널 2 (클라이언트가 돈 지 몇 초 뒤, 10초 캡처):
+
+```bash
+cd <repo>
+NSYS="$HOME/opt/nsys/opt/nvidia/nsight-systems-cli/2026.6.1/target-linux-x64/nsys"
+sudo env NSYS="$NSYS" scripts/verify/04_nsys_ctxsw.sh capture ctx_mps_on_root 10
+sudo chown "$USER" docs/verification/raw/ctx_mps_on_root.nsys-rep
+scripts/verify/04_nsys_ctxsw.sh export ctx_mps_on_root
+```
+
+터미널 1에서 워크로드가 끝난 뒤 데몬 종료와 확인:
+
+```bash
+scripts/verify/06_mps.sh stop
+pgrep -u "$USER" -a nvidia-cuda-mps   # 비어 있어야 한다
+```
+
+- 확인할 것: `GPU_CONTEXT_SWITCH_EVENTS`의 `gpuId=1` 이벤트 수와 `globalPid` 종류(클라이언트, MPS 서버, 마스킹). 비루트 `ctx_mps_on`은 GPU 1이 0건, GPU 0만 다른 사용자의 마스킹된 이벤트였다.
 
 ## Task 1: 프로젝트 스캐폴드와 검증 기록 틀
 
@@ -179,7 +211,63 @@ for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 1 --du
 
 ## Task 6: MPS OFF/ON 수집 차이 (G4)
 
-(결과 없음)
+**판정: 잠정.** 비루트 전역 캡처에서 MPS ON의 GPU 1 컨텍스트 전환 이벤트는 클라이언트 2개가 돌 때 0건이었다(`raw/06_derive.txt`). root 캡처로도 같은지는 미확인이라 "사용자 실행 대기"에 두었다. 모든 수치는 같은 날, 같은 스크립트, 같은 워크로드(2프로세스, 30초, 캡처 10초)로 얻었다.
+
+### 데몬과 명령
+- `scripts/verify/06_mps.sh start|stop|status|env`: 사용자 범위, `CUDA_VISIBLE_DEVICES=1`로 GPU 1 전용, pipe/log 디렉터리는 `/tmp/gso-mps-<uid>/` 아래. 시작 전에 이미 `nvidia-cuda-mps-control`이 있으면 거부한다. `stop`은 우리 pipe 디렉터리에만 `quit`을 보낸 뒤 이 사용자의 `nvidia-cuda-mps` 프로세스가 없는지 확인한다. 시작 전 MPS 프로세스 없음, GPU 1 유휴(0%, 1 MiB)를 확인했다. 시스템 기본 pipe 디렉터리, compute mode, sudo는 쓰지 않았다(compute mode는 전 GPU Default 그대로).
+- MPS OFF: `small_kernels --gpu 1 --duration 30` 두 개(`raw/06_off_a.json`, `06_off_b.json`)를 띄우고 14초 뒤 `capture ctx_mps_off 10`, `export ctx_mps_off`.
+- MPS ON: `eval "$(scripts/verify/06_mps.sh env)"` 뒤 `small_kernels --gpu 0 --duration 30` 두 개(`raw/06_on_a.json`, `06_on_b.json`)를 띄우고 12초 뒤 `nvidia-smi`와 `get_*` 명령을 실행, 이어서 `capture ctx_mps_on 10`, `export ctx_mps_on`.
+
+### 클라이언트에서 보이는 GPU 인덱스 (워크로드 `--gpu` 값)
+- 데몬을 `CUDA_VISIBLE_DEVICES=1`로 띄우면 클라이언트에게 보이는 장치는 1개이고 번호는 **0**이다. 클라이언트 환경이 `CUDA_VISIBLE_DEVICES=1`이면 CUDA 초기화가 실패한다: torch는 "No CUDA GPUs are available"(`raw/06_client_index.txt`), MPS 서버 로그는 "Client requested 1 which is not a valid GPU ID in the MPS visible set of devices ... less than 1 or consider using UUIDs"(`raw/06_mps_server.log`). GPU UUID를 주면 장치 1개(`count 1`)로 열리고 PCI 버스 171(=0xAB, nvidia-smi GPU 1)이었다(터미널 출력만 확인, 원본 파일은 저장하지 않음).
+- `select_gpu(N)`은 프로세스 안에서 `CUDA_VISIBLE_DEVICES=N`을 덮어쓴다. 따라서 **MPS ON에서는 `--gpu 0`이 호스트 GPU 1에서 돈다**(`raw/06_probe_gpu0.json`, `06_smi_probe_gpu0arg.txt`: 해당 프로세스가 GPU 1 항목에만 `M+C`로 보이고 GPU 0 항목에는 없음). `--gpu 1`은 실패한다. 커밋된 워크로드 코드는 바꾸지 않았다. 호스트 번호를 그대로 넘기는 MPS 벤치 러너는 이 호환 문제를 처리해야 한다(`--gpu` 값을 MPS ON일 때 0으로 매핑하거나 `select_gpu`가 이미 설정된 `CUDA_VISIBLE_DEVICES`를 존중하게 하는 둘 중 하나 필요. 어느 쪽인지는 미결정).
+- nsys 쪽: 클라이언트를 nsys로 띄운 캡처의 `TARGET_INFO_CUDA_DEVICE`는 `cudaId=0`이 `gpuId=1`로 대응했다(`raw/06_look_launched1.txt`). 전역 캡처의 `gpuId`는 OFF/ON 모두 nvidia-smi 인덱스와 같은 쪽으로 읽혔다(GPU 1에 우리 이벤트, GPU 0에 다른 사용자 이벤트).
+
+### nvidia-smi와 MPS 명령 출력
+- OFF(`raw/06_smi_off.txt`): GPU 1에 워크로드 프로세스 2개, Type `C`.
+- ON(`raw/06_smi_on.txt`): GPU 1에 `nvidia-cuda-mps-server` 1개(Type `C`, 30 MiB)와 클라이언트 2개(Type `M+C`, 각 236 MiB). 클라이언트 PID는 워크로드 JSON의 `pid`와 `get_client_list` 출력의 PID와 같다.
+- fixture: `tests/fixtures/mps_server_list.txt`(`get_server_list`: 서버 PID 한 줄), `tests/fixtures/mps_client_list.txt`(`get_client_list <서버 PID>`: 클라이언트 PID 두 줄). `get_active_thread_percentage <서버 PID>`는 `100.0`(`raw/06_atp_server.txt`). 이 명령들은 서버 PID를 인자로 받는다.
+- 데몬이 없을 때: `tests/fixtures/mps_server_list_empty.txt`에 `Cannot find MPS control daemon process` 한 줄(우리 pipe 디렉터리, stdout+stderr), 종료 코드 1. 데몬이 떠 있을 때 명령의 종료 코드는 0이다.
+
+### OFF 대비 ON (같은 캡처 창 `[0, w1]`, GPU 1)
+
+| 항목 | MPS OFF (`ctx_mps_off`) | MPS ON (`ctx_mps_on`) |
+|---|---|---|
+| GPU 1 전환 이벤트 | 205,545건 (태그 7: 102,818, 태그 8: 102,727) | 0건 |
+| GPU 1 `globalPid` 종류 | 2개: 워크로드 A, B로 디코드 | 없음 |
+| GPU 0 이벤트(타 사용자, 마스킹) | 6,284건 | 6,264건 |
+| `restore_save` | 38.8% (A 19.5%, B 19.3%) | 구간 없음 |
+| `hold` | 100.0% (A 50.1%, B 49.9%) | 구간 없음 |
+| 창 길이 `w1` | 10.138 s | 10.056 s |
+| 처리량 A / B (iter/s) | 5,655 / 5,667 | 49,779 / 54,388 |
+| p50 A / B (ms) | 0.1661 / 0.1661 | 0.0190 / 0.0176 |
+| p95 A / B (ms) | 0.1799 / 0.1799 | 0.0238 / 0.0219 |
+| p99 A / B (ms) | 0.1836 / 0.1834 | 0.0310 / 0.0288 |
+| 합계 처리량 | 11,322 | 104,167 |
+
+출처: 이벤트와 구간 `raw/06_derive.txt`(`scripts/verify/05_fix1_derive.py`의 `report`/`build` 재사용), 처리량과 지연 `raw/06_off_*.json`, `raw/06_on_*.json`. 참고로 단독 실행은 Task 2에서 53,792 iter/s(non-MPS), MPS ON 단독 한 번은 53,811 iter/s(`raw/06_probe_gpu0.json`, 12초)였다.
+- OFF 결과는 Task 4/5(`ctx_nonroot`: 194,592건, `restore_save` 41.1%, `hold` 100.0%)와 같은 모양이다.
+- ON 캡처에서 `PROCESSES`에는 `nvidia-cuda-mps` 이름의 프로세스가 두 개(제어 데몬, 서버) 있었으나 GPU 1 이벤트가 없어 이벤트 PID는 클라이언트, 서버, 마스킹 중 어느 것도 아니다(0건). GPU 0의 이벤트 6,264건은 전부 마스킹된 한 종류다.
+- 두 클라이언트의 커널 구간이 겹치는지: **미확인**. 전역 캡처에는 커널 테이블이 없고(OFF와 같음), 아래 nsys 실행 캡처는 한 클라이언트의 커널만 담는다.
+
+### nsys가 직접 띄운 MPS 클라이언트
+- 단일 클라이언트(`ctx_mps_on_launched`, `capture ... 15`, 대상은 `--gpu 0 --duration 12`): 성공. `CUPTI_ACTIVITY_KIND_KERNEL` 496,333행, `..._RUNTIME` 1,489,956행. 커널의 `globalPid`는 클라이언트 PID 하나이고 MPS 서버 PID가 아니다. `deviceId`는 0. GPU 1 전환 이벤트는 태그 8 한 건이다(`raw/06_look_launched1.txt`).
+- 클라이언트 2개 중 하나만 nsys로 띄움(`ctx_mps_on_launched2`: 나머지 하나는 nsys 밖에서 30초, 5초 먼저 시작): 성공. 커널 502,847행이 전부 nsys로 띄운 클라이언트의 것(PID 한 종류). 다른 클라이언트의 커널은 기록되지 않았다. 이 동안 두 클라이언트 처리량은 각각 44,388(nsys 아래), 50,910(밖) iter/s(`raw/06_on_launched2.json`, `06_on_other.json`). nsys 아래 값은 오버헤드를 포함하므로 위 표와 비교하지 않는다(G6).
+- 같은 캡처의 GPU 1 전환 이벤트는 13건(태그 7: 6, 8: 7)이고 캡처 시작 후 3.43~3.45 s에 몰려 있다(nsys로 띄운 클라이언트의 첫 커널은 3.53 s). 13건의 `globalPid`는 한 종류이며 nsys 밖에서 돌던 클라이언트로 디코드됐다(`raw/06_look_launched2.txt`). 이후 12초 동안 GPU 1 이벤트는 없다. 원인은 미확인.
+- 즉 MPS 클라이언트에 대해서도 직접 띄운 캡처는 커널 테이블을 만든다. 동시에 돌아가는 다른 클라이언트의 커널 구간은 얻지 못한다(둘 다 nsys로 띄우는 실험은 하지 않음).
+
+### MPS ON일 때 CTX SW/s 표시 규칙
+1. **MPS 감지.** 대상 GPU의 `nvidia-smi` 프로세스 목록에 `nvidia-cuda-mps-server`가 있거나 어떤 프로세스의 Type에 `M`이 들어 있으면(`M+C`) 그 GPU는 MPS ON이다. MPS 제어 명령(`get_server_list`)은 해당 pipe 디렉터리를 아는 같은 사용자만 쓸 수 있어 감지 근거로 쓰지 않는다(보조 정보일 뿐).
+2. **표시.** MPS ON인 GPU의 CTX SW/s 칸은 숫자 대신 `N/A (MPS)`로 쓴다. `0/s`로 쓰지 않는다: 이벤트 수 0이 "전환이 없다"인지 "기록되지 않는다"인지 이번 데이터로 가를 수 없고, 같은 조건에서 시작 시점의 이벤트 몇 건이 나온 경우도 있었다. 어느 쪽이든 GPU가 MPS ON이면 이벤트 수와 상관없이 `N/A (MPS)`다.
+3. **MPS OFF**(감지 안 됨)에서는 기존대로 이벤트 수에서 계산한 값을 쓴다.
+4. **보조 표시.** MPS ON에서는 클라이언트별 처리량·지연(앱 성능)을 우선 보여 주고, 도움말에 "MPS ON: 컨텍스트 전환 이벤트가 수집되지 않음"을 붙인다. 커널 겹침은 표시하지 않는다(전역 캡처에 커널이 없고 둘 다 nsys로 띄우는 경우는 검증하지 않음).
+5. 이 규칙은 비루트 캡처 기준이다. root 캡처에서 MPS ON의 이벤트가 달라지면 규칙 2를 다시 본다.
+
+### 미확인
+- root 캡처에서 MPS ON의 GPU 1 이벤트(0건인지, 서버 PID가 보이는지): 사용자 실행 대기.
+- 두 클라이언트의 커널 구간이 겹치는지. MPS ON에서 이벤트가 0건인 원인. `launched2`의 시작 시점 13건의 원인.
+- 클라이언트 2개를 초과하거나 다른 워크로드(큰 커널)일 때의 거동. MPS 서버가 활성 스레드 비율 제한(`get_active_thread_percentage` 100.0 외 값)을 가질 때.
+- 데몬 정리: 실험 끝에 `06_mps.sh stop`으로 종료했고 `pgrep -u "$USER" -a nvidia-cuda-mps`가 비었다. 서버/제어 로그 원본은 `raw/06_mps_control.log`, `06_mps_server.log`.
 
 ## Task 7: CUPTI 적용 범위 스파이크 (G5, 반나절 제한)
 
