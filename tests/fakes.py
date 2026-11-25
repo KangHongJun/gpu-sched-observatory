@@ -42,6 +42,10 @@ class FakeNvml:
               {"함수이름": {gpu_index: 예외}} 형태면 그 장치 핸들에서만 raise 한다.
     참고: 가짜 예외 클래스는 메시지 문자열을 받지만 실제 pynvml.NVMLError 는
           정수 코드를 받는다. 대역일 뿐이므로 의도적으로 다르다.
+    util/mem_used/power_mw/temp/enc/dec: 장치 지표 값(스칼라 또는 {gpu_index: 값}).
+              util=(gpu%, mem%), mem_used=바이트, power_mw=밀리와트, enc/dec=퍼센트.
+    proc_util:{gpu_index: [(pid, sm_util, timestamp), ...]} nvmlDeviceGetProcessUtilization 결과.
+              비어 있으면 NotFound. 받은 lastSeenTimeStamp는 .proc_util_args 에 기록.
     driver:   드라이버 버전 문자열
     as_bytes: True면 문자열을 bytes로 돌려준다(구버전 pynvml 모사)
     calls:    호출된 함수 이름 목록
@@ -51,6 +55,7 @@ class FakeNvml:
     NVMLError_NotSupported = NVMLError_NotSupported
     NVMLError_NotFound = NVMLError_NotFound
     NVMLError_Uninitialized = NVMLError_Uninitialized
+    NVML_TEMPERATURE_GPU = 0
 
     def __init__(
         self,
@@ -60,6 +65,14 @@ class FakeNvml:
         errors: dict | None = None,
         driver: str = "535.00.00",
         as_bytes: bool = False,
+        util: tuple[float, float] | dict = (37, 12),
+        mem_used: int | dict = 2 * 1024**3,
+        mem_total: int = 24 * 1024**3,
+        power_mw: float | dict = 123456,
+        temp: float | dict = 55,
+        enc: float | dict = 4,
+        dec: float | dict = 2,
+        proc_util: dict | None = None,
     ):
         if gpus is None:
             gpus = [{}]
@@ -69,7 +82,16 @@ class FakeNvml:
         self.errors = errors or {}
         self.driver = driver
         self.as_bytes = as_bytes
+        self.util = util
+        self.mem_used = mem_used
+        self.mem_total = mem_total
+        self.power_mw = power_mw
+        self.temp = temp
+        self.enc = enc
+        self.dec = dec
+        self.proc_util = proc_util or {}
         self.calls: list[str] = []
+        self.proc_util_args: list[int] = []
 
     # -- 내부 도우미 ----------------------------------------------------
     def _enter(self, fn: str, handle=None) -> None:
@@ -90,6 +112,11 @@ class FakeNvml:
             pid, mem = item if isinstance(item, tuple) else (item, None)
             out.append(SimpleNamespace(pid=pid, usedGpuMemory=mem))
         return out
+
+    @staticmethod
+    def _per_gpu(value, handle: int):
+        """스칼라면 그대로, {gpu_index: 값}이면 해당 장치 값."""
+        return value[handle] if isinstance(value, dict) else value
 
     def _gpu(self, handle: int) -> dict:
         return self.gpus[handle]
@@ -133,6 +160,44 @@ class FakeNvml:
     def nvmlDeviceGetComputeRunningProcesses(self, handle):
         self._enter("nvmlDeviceGetComputeRunningProcesses", handle)
         return self._procs(self.procs, handle)
+
+    def nvmlDeviceGetUtilizationRates(self, handle):
+        self._enter("nvmlDeviceGetUtilizationRates", handle)
+        gpu, memory = self._per_gpu(self.util, handle)
+        return SimpleNamespace(gpu=gpu, memory=memory)
+
+    def nvmlDeviceGetMemoryInfo(self, handle):
+        self._enter("nvmlDeviceGetMemoryInfo", handle)
+        used = self._per_gpu(self.mem_used, handle)
+        return SimpleNamespace(total=self.mem_total, used=used, free=self.mem_total - used)
+
+    def nvmlDeviceGetPowerUsage(self, handle):
+        self._enter("nvmlDeviceGetPowerUsage", handle)
+        return self._per_gpu(self.power_mw, handle)
+
+    def nvmlDeviceGetTemperature(self, handle, sensor):
+        self._enter("nvmlDeviceGetTemperature", handle)
+        return self._per_gpu(self.temp, handle)
+
+    def nvmlDeviceGetEncoderUtilization(self, handle):
+        self._enter("nvmlDeviceGetEncoderUtilization", handle)
+        return [self._per_gpu(self.enc, handle), 167000]
+
+    def nvmlDeviceGetDecoderUtilization(self, handle):
+        self._enter("nvmlDeviceGetDecoderUtilization", handle)
+        return [self._per_gpu(self.dec, handle), 167000]
+
+    def nvmlDeviceGetProcessUtilization(self, handle, last_seen):
+        """proc_util: {gpu_index: [(pid, sm, timestamp), ...]}. 비면 실제 NVML처럼 NotFound."""
+        self.proc_util_args.append(last_seen)
+        self._enter("nvmlDeviceGetProcessUtilization", handle)
+        rows = self.proc_util.get(handle, [])
+        if not rows:
+            raise NVMLError_NotFound("no samples")
+        return [
+            SimpleNamespace(pid=pid, timeStamp=ts, smUtil=sm, memUtil=0, encUtil=0, decUtil=0)
+            for pid, sm, ts in rows
+        ]
 
 
 def fake_run(returncode=0, stdout="", stderr="", raises=None):
