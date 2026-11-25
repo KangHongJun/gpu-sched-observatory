@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from gso.analysis.stats import summarize
+from gso.bench.workloads import select_gpu
 
 WARMUP_ITERS = 10
 
@@ -45,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--size", type=int, default=256)
     args = parser.parse_args(argv)
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    select_gpu(args.gpu)
     latencies_ms, elapsed = run(args.size, args.duration)
     result = summarize(latencies_ms, elapsed)
     result.update({"workload": "small_kernels", "pid": os.getpid()})
