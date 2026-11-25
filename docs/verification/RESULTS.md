@@ -10,7 +10,7 @@
 | G2 | nsys가 외부 프로세스의 Context 전환을 PID와 함께 잡는가 | 3주차를 nsys 캡처로 진행 | 3주차를 "직접 띄운 프로세스의 커널 타임라인"으로 축소 | **잠정: 통과(비루트 기준).** nsys 2026.6.1이 sudo 없이, 대상 프로세스를 띄우지 않고도 외부 워크로드 A/B의 GPU 컨텍스트 전환 이벤트를 PID와 함께 기록했다. root 실행과의 차이(특히 타 사용자 프로세스의 PID 마스킹)는 미확인: 아래 "사용자 실행 대기" 참고 |
 | G3 | SQLite export에서 전환·커널 테이블을 읽을 수 있는가 | Task 18을 실제 스키마로 구현 | nsys의 다른 export 형식(json)을 검토 | **통과(캡처 방식별로 범위가 다름, 비루트 기준).** 전역 캡처의 SQLite에서 컨텍스트 전환(`GPU_CONTEXT_SWITCH_EVENTS`)을 PID·GPU별로 읽을 수 있고, 직접 띄운 캡처의 SQLite에서 커널(`CUPTI_ACTIVITY_KIND_KERNEL`)을 읽을 수 있다. 한 파일에서 둘을 함께 얻는 것은 이번 캡처로는 안 된다. 전환 이벤트에서 만드는 구간은 두 구성(`restore_save` 41%, `hold` 약 100%)이 가능하고 데이터는 어느 쪽이 "실행 중"인지 정하지 못한다. 명세의 제출~실행 시작 시간은 얻을 수 없고(커널 테이블에 `start`/`end`뿐), API 호출 시작~커널 시작만 얻는다. 상세: `nsys-schema.md` |
 | G4 | MPS ON에서 전환 이벤트와 커널 중첩이 어떻게 달라지는가 | 결과대로 표시 규칙 확정 | 전환은 `N/A`, overlap과 앱 성능 우선 | **잠정: `N/A` 쪽(비루트 기준).** MPS ON에서 클라이언트 2개를 돌린 10초 전역 캡처의 GPU 1에 컨텍스트 전환 이벤트가 0건이었다(OFF는 205,545건). 프로세스당 처리량은 약 5,660 -> 약 49,800~54,400 iter/s(단일 검증 실행(OFF 1회, ON 1회), 반복 없음, 벤치마크 결과 아님). 두 MPS 클라이언트의 커널 겹침은 미확인(이 게이트의 전환 쪽 질문에만 답했다). 표시 규칙은 아래 Task 6 절. root 캡처로는 같은지 미확인: 아래 "사용자 실행 대기" 참고 |
-| G5 | CUPTI를 외부 프로세스에 붙일 수 있는가 | MVP 이후 collector 설계 입력 | MVP 이후 과제로만 기록 | 부분 통과 (Task 7: launch injection 동작, 외부 프로세스 부착은 미확인) |
+| G5 | CUPTI를 외부 프로세스에 붙일 수 있는가 | MVP 이후 collector 설계 입력 | MVP 이후 과제로만 기록 | 부분 통과 (Task 7: launch injection 동작, 타 프로세스 전환 가시성·외부 프로세스 부착은 미확인) |
 | G6 | 수집 오버헤드가 얼마인가 | README에 수치 기재 | 기본 수집 주기를 낮춘다 | 미정 |
 
 ## 사용자 실행 대기 (sudo)
@@ -275,13 +275,13 @@ for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 1 --du
 
 CUPTI 13.x(헤더·라이브러리 모두 API 버전 130202). 프로젝트 venv의 PyTorch 의존 휠(`nvidia/cu13`)에 `cupti.h`와 `libcupti.so.13`이 있어 컨테이너 없이 g++로 빌드했다. 단 `crt/host_defines.h`는 cu13 휠에 없어 같은 venv의 triton 휠 헤더를 `-idirafter`로 추가했다(`scripts/verify/07_cupti/build.sh`가 컴파일 명령을 출력). 모든 실행은 GPU 1, root 아님, 워크로드는 `small_kernels` 5초. 아래 수치는 모두 n=1 단일 실행이다.
 - **launch injection 동작.** `CUDA_INJECTION64_PATH`로 `InitializeInjection`이 호출되었고 `CONCURRENT_KERNEL`, `COMPUTE_ENGINE_CTX_SWITCH` 두 종류 모두 enable 성공(오류 없음). 종료 시 flush로 합계 출력, dropped 0 (`raw/07_inj.stderr`, `raw/07_pair_inj.stderr`).
-- **(a) 주입 프로세스 단독:** 커널 레코드 269793건, 전환 레코드 2건(START 1, END 1), 전환 레코드의 contextId는 1종(`raw/07_inj.stderr`).
-- **(b) 주입 1 + 비주입 1이 GPU 1을 공유:** 주입 프로세스에 전환 레코드 24478건(START 12237, END 12241) 도착. contextId는 1종(커널 레코드의 contextId와 같은 값 1)이고 레코드에 다른 프로세스를 구분할 필드가 없다(`raw/07_pair_inj.stderr`). 다른 프로세스의 컨텍스트가 별도 ID로 보이지는 않았다. 컨텍스트 ID는 프로세스 내 번호라 다른 프로세스 것과 같은 값일 수 있어, "자기 것만 온다"고 단정하지는 않고 "ID로 상대를 구별할 수 없다"로 기록한다. 레코드 필드는 `contextId`, `timestamp`, `operationType`뿐이고 PID·상대 컨텍스트는 없다(`cupti_activity.h`).
+- **(a) 주입 프로세스 단독:** 커널 레코드 269793건, 전환 레코드 2건(START 1, END 1; (b)의 24478건과 비교해 GPU를 공유할 때 훨씬 많았다는 관측이며 원인은 확인하지 않음), 전환 레코드의 contextId는 1종(`raw/07_inj.stderr`).
+- **(b) 주입 1 + 비주입 1이 GPU 1을 공유:** 주입 프로세스에 전환 레코드 24478건(START 12237, END 12241) 도착. contextId는 1종(커널 레코드의 contextId와 같은 값 1)이고 레코드에 다른 프로세스를 구분할 필드가 없다(`raw/07_pair_inj.stderr`). 다른 프로세스의 컨텍스트가 별도 ID로 보이지는 않았다. 컨텍스트 ID는 프로세스 내 번호라 다른 프로세스 것과 같은 값일 수 있어, "자기 것만 온다"고 단정하지는 않고 "ID로 상대를 구별할 수 없다"로 기록한다. 전환 레코드(`CUpti_ActivityComputeEngineCtxSwitch`, `.venv/…/nvidia/cu13/include/cupti_activity.h` 약 9480~9511행)의 필드는 `contextId`, `timestamp`, `operationType`뿐이라 PID가 레코드에 없다. 다른 레코드·API가 PID를 주는지는 미확인: `CUPTI_ACTIVITY_KIND_CONTEXT`는 켜 보지 않았다. 기획서는 `CUpti_ActivityContext`의 processId로 PID에 연결한다고 적었고, 이 장비 헤더(CUPTI API 130202)에서는 `CUpti_ActivityContext4`(약 5521행 끝, 5260행 부근이 이 버전을 지목)에 `uint64_t processId`("컨텍스트에 연결된 프로세스 ID", 약 5519행)가 있다. 즉 기획서 전제는 이 헤더에서 필드로는 존재하지만 실제로 값이 채워지는지는 시험하지 않았다.
 - **(c) 처리량(n=1):** 주입 단독 53956/s, 비주입 단독 55048/s(`raw/07_inj.json`, `raw/07_base.json`). 공유 실행 쌍에서는 주입 6902/s, 비주입 6807/s(`raw/07_pair_inj.json`, `raw/07_pair_plain.json`). 단독 비교 차이 약 2%는 단일 실행이라 잡음과 구분하지 못한다.
-- **실행 중인 프로세스에 붙이기(문서 기반 결론, 실험하지 않음).** 주입 라이브러리는 CUDA 초기화 때 읽히므로 이미 실행 중인 프로세스에는 환경 변수 방식으로 붙일 수 없다. 헤더에는 늦게 붙이는 경우의 제약(일부 레코드는 CUDA 초기화 전에 붙어야 얻음)이 적혀 있어 CUPTI 자체의 늦은 활성화는 가능하지만 대상 프로세스 안에서 코드가 실행되어야 한다. 외부 프로세스에 코드를 넣는 방법(ptrace 등)은 시도하지 않았고 **미확인**.
-- 필요한 권한: 일반 사용자 프로세스에서 위 레코드가 도착했다(root 불필요). 단 이는 내가 직접 띄운 프로세스에 한한다.
-- **판정 G5: 부분 통과.** 새로 띄우는 프로세스에는 launch injection으로 붙일 수 있고, 시분할 중 전환 레코드(START/END)가 일반 사용자 프로세스에 도착한다. 이미 실행 중인 외부 프로세스에 붙이는 것과 상대 프로세스 식별은 확인되지 않았다.
-- post-MVP collector가 의존할 수 있는 것: 자기가 띄운 프로세스의 커널/전환 시각. 의존할 수 없는 것: 전환 상대의 PID, 남이 띄운 프로세스 관측(전환 레코드에 PID가 없음).
+- **실행 중인 프로세스에 붙이기(문서 기반 결론, 실험하지 않음).** 주입 라이브러리는 CUDA 초기화 때 읽히므로 이미 실행 중인 프로세스에는 환경 변수 방식으로 붙일 수 없다. 헤더(`cupti_activity.h` 10523, 10637행 부근)는 디바이스 레코드가 "CUDA 초기화 전에 CUPTI를 붙여야만 얻을 수 있다"고 적고, 같은 곳에 늦게 붙는 경우 현재 활성 컨텍스트/스트림/디바이스 레코드를 받는 용도의 API 설명이 있다. 이로부터 늦은 활성화 자체는 가능할 것이라는 것은 추론이며 시험하지 않았다. 어느 경우든 대상 프로세스 안에서 코드가 실행되어야 한다. 외부 프로세스에 코드를 넣는 방법(ptrace 등)은 시도하지 않았고 **미확인**.
+- 필요한 권한: 일반 사용자 프로세스에서 위 레코드가 도착했다(root 불필요). 단 이는 내가 직접 띄운 프로세스에 한하며, 이 레코드가 다른 프로세스의 전환까지 포괄한다는 증거는 얻지 못했다((b)에서 전환 레코드의 contextId는 커널 레코드와 같은 1종뿐이라 자기 컨텍스트에 대한 것으로 보이나 단정하지 않음).
+- **판정 G5: 부분 통과.** 새로 띄우는 프로세스에는 launch injection으로 붙일 수 있고, GPU 공유 중 전환 레코드(START/END)가 일반 사용자 프로세스에 도착하지만, 다른 프로세스의 전환까지 보인다는 것은 입증되지 않았다. 이미 실행 중인 외부 프로세스에 붙이는 것과 PID 획득(CONTEXT 종류 미시험)은 미확인.
+- post-MVP collector가 의존할 수 있는 것: 자기가 띄운 프로세스의 커널/전환 시각. 확인되지 않은 것: 전환 레코드 자체에는 PID가 없고, 상대 프로세스의 전환이 전달되는지와 CONTEXT 레코드의 processId 값은 미확인.
 
 ## Task 8: 오버헤드 측정과 게이트 판정 (G6)
 
