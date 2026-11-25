@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from types import SimpleNamespace
+from typing import ClassVar
 
 
 class NVMLError(Exception):
@@ -213,3 +214,49 @@ def fake_run(returncode=0, stdout="", stderr="", raises=None):
     run.argvs = []
     run.kwargs = []
     return run
+
+
+class FakeCollector:
+    """Stands in for gso.collector.Collector; instances are kept in ``made``."""
+
+    made: ClassVar[list] = []
+    records_on_start: ClassVar[list] = []
+    nvml_error = None
+    dcgm_error = None
+
+    def __init__(self, buffer, caps, gpu_index, **kw):
+        self.buffer = buffer
+        self.starts = 0
+        self.stops = 0
+        FakeCollector.made.append(self)
+
+    def start(self):
+        self.starts += 1
+        for r in FakeCollector.records_on_start:
+            self.buffer.push(r)
+
+    def stop(self):
+        self.stops += 1
+
+    @property
+    def status(self):
+        return SimpleNamespace(nvml_error=FakeCollector.nvml_error,
+                               dcgm_error=FakeCollector.dcgm_error)
+
+
+class FakeTime:
+    """Injected clock and sleep: sleeping advances the clock; ``on_sleep`` may push records."""
+
+    def __init__(self, on_sleep=None):
+        self.now = 0.0
+        self.sleeps = []
+        self.on_sleep = on_sleep
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, s):
+        self.sleeps.append(s)
+        self.now += s
+        if self.on_sleep:
+            self.on_sleep(len(self.sleeps))

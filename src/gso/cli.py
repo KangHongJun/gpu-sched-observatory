@@ -3,6 +3,9 @@
 import argparse
 import math
 import shlex
+import sys
+import time
+from pathlib import Path
 
 from gso import __version__
 from gso.capability import DCGM_FIELD_IDS, Capabilities, detect
@@ -52,6 +55,13 @@ def _positive_float(text: str) -> float:
     return v
 
 
+def _interval(text: str) -> float:
+    v = _positive_float(text)
+    if v < MIN_INTERVAL_S:
+        raise argparse.ArgumentTypeError(f"must be >= {MIN_INTERVAL_S}, got {text}")
+    return v
+
+
 def _dcgm_interval_ms(text: str) -> int:
     try:
         v = int(text)
@@ -60,6 +70,10 @@ def _dcgm_interval_ms(text: str) -> int:
     if v < 100:
         raise argparse.ArgumentTypeError(f"must be >= 100, got {text}")
     return v
+
+
+MIN_INTERVAL_S = 0.1
+DRAIN_EVERY_S = 1.0
 
 
 def live_buffer_capacity(interval_s: float, dcgm_interval_ms: int) -> int:
@@ -71,11 +85,10 @@ def live_buffer_capacity(interval_s: float, dcgm_interval_ms: int) -> int:
     return nvml_ticks * (6 + 8 * 3) + dcgm_ticks * 5
 
 
-def build_live(args):
-    """Build the live app (collector not started). Separate from run so it is testable."""
+def build_collection(args):
+    """Detect, create the buffer and the (not started) collector. No Textual import."""
     from gso.buffer import RingBuffer
     from gso.collector import Collector
-    from gso.tui.app import GsoApp
 
     dcgmi_cmd = shlex.split(args.dcgmi_cmd)
     caps = detect(dcgmi_cmd=dcgmi_cmd, dcgm_gpu_index=args.dcgm_gpu_index)
@@ -89,7 +102,85 @@ def build_live(args):
         dcgmi_cmd=dcgmi_cmd,
         dcgm_gpu_index=args.dcgm_gpu_index,
     )
+    return buffer, caps, collector
+
+
+def build_live(args):
+    """Build the live app (collector not started). Separate from run so it is testable."""
+    from gso.tui.app import GsoApp  # Textual only on the interactive path
+
+    buffer, caps, collector = build_collection(args)
     return GsoApp(buffer, caps, args.gpu, collector=collector, interval_s=args.interval)
+
+
+def _summary(count: int, path, elapsed_s: float, lost: int, what: str) -> str:
+    line = f"gso: wrote {count} records to {path} in {elapsed_s:.1f}s"
+    if lost:
+        line += f"; {lost} records {what}"
+    return line
+
+
+def run_interactive(args, clock=time.monotonic) -> int:
+    from gso.export import write_records
+
+    t0 = clock()
+    app = build_live(args)
+    try:
+        app.run()
+    finally:
+        app._collector.stop()
+    if args.export:
+        buffer = app._buffer
+        n = write_records(buffer.snapshot(), args.export)
+        print(_summary(n, args.export, clock() - t0, buffer.dropped,
+                       "dropped by the ring buffer (not exported)"), file=sys.stderr)
+    return 0
+
+
+def run_headless(args, sleep=time.sleep, clock=time.monotonic) -> int:
+    from gso.export import drain_to, open_stream
+
+    buffer, _caps, collector = build_collection(args)
+    stream = open_stream(args.export)
+    cursor = lost = 0
+    code = 0
+    t0 = clock()
+
+    def drain() -> None:
+        nonlocal cursor, lost
+        cursor, n = drain_to(buffer, stream, cursor)
+        lost += n
+
+    try:
+        try:
+            collector.start()
+            while True:
+                remaining = args.duration - (clock() - t0)
+                if remaining <= 0:
+                    break
+                sleep(min(DRAIN_EVERY_S, remaining))
+                drain()
+        except KeyboardInterrupt:
+            code = 130
+        finally:
+            collector.stop()
+        drain()  # whatever the collector pushed up to its stop
+    finally:
+        stream.close()
+    status = collector.status
+    print(_summary(stream.count, args.export, clock() - t0, lost,
+                   "dropped by the ring buffer before they could be written"), file=sys.stderr)
+    errors = False
+    for label, e in (("NVML", status.nvml_error), ("DCGM", status.dcgm_error)):
+        if e:
+            errors = True
+            print(f"gso: {label}: {e}", file=sys.stderr)
+    if stream.count == 0 and code == 0:
+        why = "see the errors above" if errors else "the collector produced nothing"
+        print(f"gso: no records were collected ({why})", file=sys.stderr)
+    if code:
+        return code
+    return 0 if stream.count > 0 else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -112,23 +203,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     live = sub.add_parser("live", help="live metrics screen for one GPU")
     live.add_argument("--gpu", type=int, required=True, help="GPU index to watch")
-    live.add_argument("--interval", type=_positive_float, default=1.0,
-                      help="refresh interval in seconds (default 1.0)")
+    live.add_argument("--interval", type=_interval, default=1.0,
+                      help=f"refresh interval in seconds, >= {MIN_INTERVAL_S} (default 1.0)")
     live.add_argument("--dcgm-interval-ms", type=_dcgm_interval_ms, default=1000,
                       help="DCGM sampling interval in ms, >= 100 (default 1000)")
     live.add_argument("--dcgmi-cmd", default="dcgmi",
                       help='dcgmi command, e.g. "docker exec gso-dcgm dcgmi"')
     live.add_argument("--dcgm-gpu-index", type=int, default=None,
                       help="GPU index passed to dcgmi -i (differs from the host index in a container)")
+    live.add_argument("--export", metavar="PATH", default=None,
+                      help="write metric records to PATH (.jsonl or .csv). Interactive: written when "
+                           "the screen closes and limited to the buffer (about the last 5 minutes); "
+                           "with --headless: streamed for the whole run")
+    live.add_argument("--headless", action="store_true",
+                      help="no terminal UI: collect for --duration seconds and write --export")
+    live.add_argument("--duration", type=_positive_float, default=None, metavar="SECONDS",
+                      help="headless run length in seconds (> 0)")
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def _validate_live(parser: argparse.ArgumentParser, args) -> None:
+    from gso.export import check_export_path
+
+    if args.headless and args.duration is None:
+        parser.error("--headless requires --duration")
+    if args.headless and not args.export:
+        parser.error("--headless requires --export")
+    if args.duration is not None and not args.headless:
+        parser.error("--duration requires --headless (the interactive screen has no duration)")
+    if args.export:
+        try:
+            check_export_path(args.export)
+        except ValueError as e:
+            parser.error(str(e))
+        if not Path(args.export).resolve().parent.is_dir():
+            parser.error(f"directory does not exist: {Path(args.export).parent}")
+
+
+def main(argv: list[str] | None = None, *, sleep=time.sleep, clock=time.monotonic) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "live":
-        build_live(args).run()
-        return 0
+        _validate_live(parser, args)
+        if args.headless:
+            return run_headless(args, sleep=sleep, clock=clock)
+        return run_interactive(args, clock=clock)
     if args.command == "doctor":
         caps = detect(
             dcgmi_cmd=shlex.split(args.dcgmi_cmd), dcgm_gpu_index=args.dcgm_gpu_index

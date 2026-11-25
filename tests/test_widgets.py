@@ -118,3 +118,13 @@ def test_formatters():
     assert fmt_temp(None) == "N/A"
     assert fmt_power(178.4) == "178 W"
     assert fmt_power(None) == "N/A"
+
+
+import pytest
+
+
+@pytest.mark.parametrize("v", [float("nan"), float("inf"), float("-inf")])
+def test_bar_non_finite_is_na(v):
+    assert "N/A" in bar(v)
+    assert len(bar(v)) == len(bar(50.0))
+    assert len(bar(v, 10)) == len(bar(50.0, 10))

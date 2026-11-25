@@ -5,6 +5,7 @@ Rule: an unknown value is "N/A", never 0 and never a stale number shown as curre
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from gso.record import Record
@@ -16,8 +17,8 @@ _BLOCKS = "▁▂▃▄▅▆▇█"
 
 def bar(value: float | None, width: int = 16) -> str:
     """``[####----] 78%``. The fill is the value clamped to 0-100 rounded to the nearest cell (Python round, half to even);
-    the number shown is the rounded (unclamped) value. None -> centred N/A, same total length."""
-    if value is None:
+    the number shown is the rounded (unclamped) value. None or non-finite -> centred N/A, same total length."""
+    if value is None or not math.isfinite(value):
         return f"[{NA.center(width)}] {NA}"
     frac = min(max(value, 0.0), 100.0) / 100.0
     fill = round(frac * width)

@@ -118,3 +118,24 @@ def test_concurrent_reader_never_sees_overfull_snapshot():
     assert errors == []
     assert lengths, "reader made no snapshots"
     assert max(lengths) <= 100
+
+
+def test_read_from_returns_each_record_once_in_order():
+    buf = RingBuffer(10)
+    for i in range(3):
+        buf.push(rec(5, f"m{i}"))  # same timestamp
+    recs, nxt, lost = buf.read_from(0)
+    assert [r.metric for r in recs] == ["m0", "m1", "m2"] and nxt == 3 and lost == 0
+    buf.push(rec(5, "m3"))
+    recs, nxt, lost = buf.read_from(nxt)
+    assert [r.metric for r in recs] == ["m3"] and nxt == 4 and lost == 0
+    assert buf.read_from(nxt) == ([], 4, 0)
+
+
+def test_read_from_reports_overwritten_records():
+    buf = RingBuffer(3)
+    for i in range(5):
+        buf.push(rec(i, f"m{i}"))
+    recs, nxt, lost = buf.read_from(0)
+    assert [r.metric for r in recs] == ["m2", "m3", "m4"]
+    assert nxt == 5 and lost == 2
