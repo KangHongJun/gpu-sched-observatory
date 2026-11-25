@@ -8,7 +8,7 @@
 |---|---|---|---|---|
 | G1 | A5000에서 DCGM 1001~1005가 나오는가 | Live에 5개 막대 표시 | 해당 필드는 `N/A`, Live는 NVML 중심 | 통과: 1001~1005 전부 지원되고 0이 아닌 값이 관측됨(1004는 FP16 행렬곱 부하에서 0.951~0.959, small_kernels에서는 0.000). 1006만 미지원 |
 | G2 | nsys가 외부 프로세스의 Context 전환을 PID와 함께 잡는가 | 3주차를 nsys 캡처로 진행 | 3주차를 "직접 띄운 프로세스의 커널 타임라인"으로 축소 | **잠정: 통과(비루트 기준).** nsys 2026.6.1이 sudo 없이, 대상 프로세스를 띄우지 않고도 외부 워크로드 A/B의 GPU 컨텍스트 전환 이벤트를 PID와 함께 기록했다. root 실행과의 차이(특히 타 사용자 프로세스의 PID 마스킹)는 미확인: 아래 "사용자 실행 대기" 참고 |
-| G3 | SQLite export에서 전환·커널 테이블을 읽을 수 있는가 | Task 18을 실제 스키마로 구현 | nsys의 다른 export 형식(json)을 검토 | **통과(캡처 방식별로 범위가 다름, 비루트 기준).** 전역 캡처의 SQLite에서 컨텍스트 전환(`GPU_CONTEXT_SWITCH_EVENTS`)을 PID·GPU별로 읽을 수 있고, 직접 띄운 캡처의 SQLite에서 커널(`CUPTI_ACTIVITY_KIND_KERNEL`)을 읽을 수 있다. 한 파일에서 두 가지를 함께 얻는 것은 이번 캡처로는 안 된다(전역 캡처엔 커널 테이블이 없고 직접 캡처엔 전환이 7건뿐). 커널 테이블에는 큐/제출 시각 열이 없다(`start`/`end`만, 런타임 API 시각으로 근사 가능). 상세: `nsys-schema.md` |
+| G3 | SQLite export에서 전환·커널 테이블을 읽을 수 있는가 | Task 18을 실제 스키마로 구현 | nsys의 다른 export 형식(json)을 검토 | **통과(캡처 방식별로 범위가 다름, 비루트 기준).** 전역 캡처의 SQLite에서 컨텍스트 전환(`GPU_CONTEXT_SWITCH_EVENTS`)을 PID·GPU별로 읽을 수 있고, 직접 띄운 캡처의 SQLite에서 커널(`CUPTI_ACTIVITY_KIND_KERNEL`)을 읽을 수 있다. 한 파일에서 둘을 함께 얻는 것은 이번 캡처로는 안 된다. 전환 이벤트에서 만드는 구간은 두 구성(`restore_save` 41%, `hold` 약 100%)이 가능하고 데이터는 어느 쪽이 "실행 중"인지 정하지 못한다. 명세의 제출~실행 시작 시간은 얻을 수 없고(커널 테이블에 `start`/`end`뿐), API 호출 시작~커널 시작만 얻는다. 상세: `nsys-schema.md` |
 | G4 | MPS ON에서 전환 이벤트와 커널 중첩이 어떻게 달라지는가 | 결과대로 표시 규칙 확정 | 전환은 `N/A`, overlap과 앱 성능 우선 | 미정 |
 | G5 | CUPTI를 외부 프로세스에 붙일 수 있는가 | MVP 이후 collector 설계 입력 | MVP 이후 과제로만 기록 | 미정 |
 | G6 | 수집 오버헤드가 얼마인가 | README에 수치 기재 | 기본 수집 주기를 낮춘다 | 미정 |
@@ -156,13 +156,14 @@ for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 1 --du
 
 ### 읽을 수 있는 것
 - **전역 캡처**: `GPU_CONTEXT_SWITCH_EVENTS`(tag, vmId, seqNo, contextId, timestamp, globalPid, gpuId). `ENUM_GPU_CTX_SWITCH`가 태그 -1, 0~11을 정의한다(7 `SAVE_END`, 8 `RESTORE_START`가 관측된 전부이고 나머지 값의 의미/출현은 미확인). 시각은 캡처 시작 기준 ns. PID는 `(globalPid >> 24) & 0xFFFFFF`: 워크로드 JSON의 PID와 일치하고, `PROCESSES`의 2,110행 전부에서도 성립하지만(교차 검증) 공식 문서로 확인하지 않은 경험식이다. 다른 사용자는 `globalPid == 1<<48`(PID 0)로 합쳐져 프로세스별로 구분되지 않는다.
-- **직접 띄운 캡처**: `CUPTI_ACTIVITY_KIND_KERNEL`(`start`, `end`, `deviceId`, `contextId`, `streamId`, `correlationId`, `globalPid`, 이름은 `StringIds` 참조). **큐/제출 시각 열은 없다**(`qmd*Done` 열은 있으나 전 행 NULL). 런타임 API 시각(`CUPTI_ACTIVITY_KIND_RUNTIME`, `correlationId` 조인)으로 근사하며 `kernel.start - runtime.start` p50 4.9 µs. `deviceId`는 프로세스 안의 CUDA 번호(CUDA_VISIBLE_DEVICES=1이라 0)이고 실제 GPU는 `TARGET_INFO_CUDA_DEVICE(gpuId, cudaId, pid)`로 얻는다. 두 테이블의 `contextId`는 서로 다른 번호 공간이다.
+- **직접 띄운 캡처**: `CUPTI_ACTIVITY_KIND_KERNEL`(`start`, `end`, `deviceId`, `contextId`, `streamId`, `correlationId`, `globalPid`, 이름은 `StringIds` 참조). **큐/제출 시각 열은 없다**(`qmd*Done` 열은 있으나 전 행 NULL). API 호출 시작 시각(`CUPTI_ACTIVITY_KIND_RUNTIME`, `correlationId` 조인)과의 차이 `kernel.start - runtime.start`만 얻는다(p50 4.9 µs, 제출 시각이 아님). `deviceId`는 프로세스 안의 CUDA 번호(CUDA_VISIBLE_DEVICES=1이라 0)이고 실제 GPU는 `TARGET_INFO_CUDA_DEVICE(gpuId, cudaId, pid)`로 얻는다. 두 테이블의 `contextId`는 서로 다른 번호 공간이다.
 - **유실 표시**: 전용 테이블/열은 없고 `DIAGNOSTIC_EVENT.text`의 문장("Number of GPU context switch events collected: N", CUPTI 이벤트 누락/폐기 경고)과 `seqNo`의 연속성이 전부다. 이번 전역 캡처는 수집 개수가 행 수와 같고 `seqNo` 틈이 0건이다.
 
-### 활성 구간 규칙 (전역 캡처 GPU 1, 워크로드 A/B)
-- 문자 그대로: 8=`RESTORE_START`, 7=`SAVE_END`. 해석: 같은 컨텍스트의 8에서 다음 7까지를 "그 컨텍스트가 올라와 있던 구간"으로 본다. 7 없이 8이 다시 오면 이전 8은 버리고(56건), 짝 없는 7은 버린다(136건). 열린 채 끝난 8은 0건.
-- 구간 97,200개, 서로 다른 컨텍스트 구간 간 겹침 0건, 구간 안에 다른 컨텍스트 이벤트가 낀 구간 0건. 길이 p50/p95/p99 = 37.4/37.4/37.5 µs(99.88%가 35~40 µs, 100 µs 이상 97건, 최대 27.5 ms). 연속 구간 사이 간격 p50 52.6 µs이며 이를 전환 비용이라 부르지 않는다(그 시간의 GPU 활동은 이벤트로 알 수 없음). 구간 합은 시간폭의 41%.
-- 한계: 이 규칙은 한 쌍의 프로세스·GPU 1에서만 확인했고, 경합 중 구간을 실제 커널 실행과 대조하지 못했다(전역 캡처에 커널이 없음).
+### 전환 이벤트에서 구간 만들기 (전역 캡처 GPU 1, 워크로드 A/B)
+- 문자 그대로: 8=`RESTORE_START`, 7=`SAVE_END`. 해석은 두 가지이고 데이터는 고르지 못한다: `restore_save`(같은 컨텍스트의 8→다음 7)는 시간폭의 41.1%(컨텍스트당 약 20%, 구간 97,200개, 짝 없는 7 136건, 재개방 8 56건), `hold`(다른 컨텍스트의 다음 8까지 쥠)는 100.0%(컨텍스트당 약 50%). 경합하는 두 프로세스가 GPU를 채워도 `restore_save`로는 약 20%가 나오므로, 이 비율은 "점유"가 아니라 "RESTORE_START→SAVE_END 구간 비율"이라 부르고 실제보다 약 2.5배 낮을 수 있다. 서로 다른 컨텍스트 구간이 겹치지 않는 것은 두 구성 모두에서 성립하므로 어느 쪽의 근거도 아니다.
+- 창 가장자리의 열린 구간은 버리지 않고 창으로 자른다. 단독 프로세스 캡처에서는 열린 구간을 버리면 약 0.15%(닫힌 8→7 한 쌍 23 ms/15 s), `[첫 이벤트, 마지막 이벤트]`로 자르면 창이 23.9 ms뿐이라 97~100%로 의미가 없고, 캡처 종료 시각까지 자르면 둘 다 약 100%(11.4 s)다. 그래서 창 끝을 캡처 종료 시각으로 넘겨야 한다. nvidia-smi 99~100%는 거친 수치라 41%를 확인도 반박도 하지 못한다.
+- 구간 사이 간격 p50 52.6 µs(7→8)를 전환 비용이라 부르지 않는다. 한계: 한 쌍의 프로세스·GPU 1에서만 확인했고 경합 중 구간을 커널 실행과 대조하지 못했다.
+- 커널 쪽: 큐/제출 시각이 없어 "제출~실행 시작"은 얻을 수 없고 API 호출 시작~커널 시작(p50 4.9 µs)만 얻는다. 이 워크로드는 매 실행 뒤 동기화하므로 큐가 빈 상태에서 잰 값이며, 비동기/경합 시에는 앞선 커널의 시간이 섞인다.
 
 ### 비루트 전역 캡처의 마지막 이벤트
 - 마지막 이벤트(10.117 s)가 "Profiling has stopped"(10.000 s)보다 늦다. 원인 미확인.
