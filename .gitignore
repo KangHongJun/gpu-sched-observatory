@@ -8,3 +8,4 @@ docs/verification/raw/
 *.sqlite
 !tests/fixtures/*.sqlite
 bench-results/
+scripts/verify/07_cupti/build/
