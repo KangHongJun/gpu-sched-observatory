@@ -1,0 +1,13 @@
++----------------+----------+------------------------------------------------------+
+| Group.Subgroup | Field ID | Field Tag                                            |
++----------------+----------+------------------------------------------------------+
+| A.1            | 1002     | sm_active                                            |
+| A.1            | 1003     | sm_occupancy                                         |
+| A.1            | 1004     | tensor_active                                        |
+| A.1            | 1007     | fp32_active                                          |
+| A.3            | 1008     | fp16_active                                          |
+| B.0            | 1005     | dram_active                                          |
+| C.0            | 1009     | pcie_tx_bytes_per_second                             |
+| C.0            | 1010     | pcie_rx_bytes_per_second                             |
+| D.0            | 1001     | gr_engine_active                                     |
+| E.0            | 1011     | prof_nvlink_tx_bytes_per_second                      |
