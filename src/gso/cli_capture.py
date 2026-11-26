@@ -33,8 +33,8 @@ _EPILOG = (
     "context-switch events of every process on every GPU (the report covers --gpu only);\n"
     "no CUDA kernel intervals. With a command after '--' the command is launched under nsys\n"
     "and its kernel intervals are captured. For a launched command CUDA_DEVICE_ORDER=PCI_BUS_ID\n"
-    "and CUDA_VISIBLE_DEVICES=<gpu> are set unless you already set them (the project's own\n"
-    "workloads also set them themselves).\n"
+    "and CUDA_VISIBLE_DEVICES=<gpu> are always set; if CUDA_VISIBLE_DEVICES is already set to\n"
+    "anything else, gso refuses (exit 2) instead of running the command on another GPU.\n"
     "The launched command is NOT ended when the capture ends unless --end-target is given.\n"
     "Never uses sudo; without root, other users' processes appear masked (summary: masked true).\n"
     "Writes DIR/summary.json, DIR/timeline.txt, DIR/capture.sqlite (and capture.nsys-rep with\n"
@@ -102,6 +102,13 @@ def validate(parser: argparse.ArgumentParser, args, target: list[str] | None) ->
         parser.error("--end-target needs a command after '--'")
     if args.gpu < 0:
         parser.error("--gpu must be >= 0")
+    inherited = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if target is not None and inherited is not None and inherited != str(args.gpu):
+        parser.error(
+            f"CUDA_VISIBLE_DEVICES={inherited!r} is set in this environment and is not "
+            f"exactly --gpu {args.gpu}; the launched command would not run on the GPU "
+            "being reported. Unset it or set it to the --gpu index."
+        )
     out = Path(args.out)
     if out.exists() and not out.is_dir():
         parser.error(f"--out is not a directory: {args.out}")
@@ -117,8 +124,8 @@ def validate(parser: argparse.ArgumentParser, args, target: list[str] | None) ->
 
 def _target_env(gpu: int) -> dict[str, str]:
     env = dict(os.environ)
-    env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-    env.setdefault("CUDA_VISIBLE_DEVICES", str(gpu))
+    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     return env
 
 

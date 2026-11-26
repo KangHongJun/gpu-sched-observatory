@@ -134,7 +134,7 @@ def test_default_duration_is_10(tmp_path, fake):
 def test_target_passthrough_and_env_defaults(tmp_path, fake, monkeypatch, capsys):
     fake.fixture, fake.mode = "nsys_launched_min.sqlite", "launched"
     monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     argv = [
         "--gpu",
         "1",
@@ -165,7 +165,7 @@ def test_target_passthrough_and_env_defaults(tmp_path, fake, monkeypatch, capsys
         "8",
     ]
     assert kw["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
-    assert kw["env"]["CUDA_VISIBLE_DEVICES"] == "3"  # the user's value wins
+    assert kw["env"]["CUDA_VISIBLE_DEVICES"] == "1"
     assert kw["end_target"] is False
     assert "may still be running" in capsys.readouterr().err
     assert (
@@ -173,15 +173,39 @@ def test_target_passthrough_and_env_defaults(tmp_path, fake, monkeypatch, capsys
     )
 
 
-def test_env_default_cuda_visible_devices(tmp_path, fake, monkeypatch):
+def test_env_cuda_visible_devices_set_and_order_forced(tmp_path, fake, monkeypatch):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setenv("CUDA_DEVICE_ORDER", "FASTEST_FIRST")
     run(["--gpu", "2", "--out", str(tmp_path), "--", "true"])
     env = fake.calls[0][2]["env"]
-    assert (
-        env["CUDA_VISIBLE_DEVICES"] == "2"
-        and env["CUDA_DEVICE_ORDER"] == "FASTEST_FIRST"
-    )
+    assert env["CUDA_VISIBLE_DEVICES"] == "2"
+    assert env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"  # never inherited
+
+
+def test_env_matching_cuda_visible_devices_is_accepted(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2")
+    assert run(["--gpu", "2", "--out", str(tmp_path), "--", "true"]) == 0
+    assert fake.calls[0][2]["env"]["CUDA_VISIBLE_DEVICES"] == "2"
+
+
+@pytest.mark.parametrize("inherited", ["1", "0,2", "", "GPU-abc"])
+def test_conflicting_inherited_cuda_visible_devices_refused(
+    tmp_path, fake, monkeypatch, capsys, inherited
+):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", inherited)
+    with pytest.raises(SystemExit) as e:
+        run(["--gpu", "2", "--out", str(tmp_path), "--", "true"])
+    assert e.value.code == 2
+    err = capsys.readouterr().err
+    assert "CUDA_VISIBLE_DEVICES" in err and "--gpu 2" in err
+    assert fake.calls == []
+
+
+def test_inherited_cuda_visible_devices_ignored_without_target(
+    tmp_path, fake, monkeypatch
+):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    assert run(["--gpu", "2", "--out", str(tmp_path)]) == 0
 
 
 def test_end_target_passed(tmp_path, fake):

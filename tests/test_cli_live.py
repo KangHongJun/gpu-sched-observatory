@@ -231,6 +231,20 @@ def test_headless_zero_records_exits_1_with_reason(tmp_path, fake_collector, cap
     assert not out.exists() and list(tmp_path.iterdir()) == []  # nothing to commit
 
 
+@pytest.mark.parametrize("gpu", ["7", "-1"])
+def test_headless_unknown_gpu_fails_fast(tmp_path, fake_collector, capsys, gpu):
+    out = tmp_path / "o.jsonl"
+    code, ft = run_main(
+        ["live", "--gpu", gpu, "--headless", "--duration", "60", "--export", str(out)]
+    )
+    assert code == 1  # nothing written
+    assert ft.sleeps == [] and ft.now == 0.0  # did not idle for the duration
+    assert all(c.starts == 0 for c in fake_collector.made)
+    err = capsys.readouterr().err
+    assert f"GPU {gpu} not found" in err
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_headless_status_errors_printed_each_line_even_with_records(
     tmp_path, fake_collector, capsys
 ):
@@ -541,3 +555,23 @@ def test_headless_duration_excludes_detect_time(tmp_path, monkeypatch, fake_coll
     fake_collector.records_on_start = [mk(1)]
     code, _ = run_main([*HEADLESS, str(tmp_path / "o.jsonl")], ft)
     assert code == 0 and sum(ft.sleeps) == pytest.approx(3.0)
+
+
+def test_staleness_window_follows_slower_source(fake_collector):
+    def age(interval, dcgm_ms):
+        args = cli.build_parser().parse_args(
+            [
+                "live",
+                "--gpu",
+                "1",
+                "--interval",
+                str(interval),
+                "--dcgm-interval-ms",
+                str(dcgm_ms),
+            ]
+        )
+        return cli.build_live(args)._max_age_ns
+
+    assert age(0.1, 1000) == 3_000_000_000  # fast NVML, default DCGM: no N/A flicker
+    assert age(1.0, 5000) == 15_000_000_000  # slow DCGM interval is honoured
+    assert age(2.0, 200) == 6_000_000_000

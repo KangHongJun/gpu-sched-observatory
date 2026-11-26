@@ -264,7 +264,7 @@ def run_cli(
         elapsed = measured.elapsed_s
         result = {
             "iterations": measured.iterations,
-            "throughput_per_s": measured.iterations / elapsed if elapsed > 0 else 0.0,
+            "throughput_per_s": measured.iterations / elapsed if elapsed > 0 else None,
             "latency_ms": {"p50": None, "p95": None, "p99": None},
         }
         extra = measured.extra

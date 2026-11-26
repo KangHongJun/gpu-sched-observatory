@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# G6 검증: 수집 오버헤드 측정(GPU 1 전용, MPS OFF).
+# G6 검증: 수집 오버헤드 측정(GSO_GPU 하나 전용, MPS OFF).
 # 조건 none / dcgm / nsys를 번갈아 3회씩(30초, small_kernels 2-process), 마지막에 DCGM+nsys 동시 1회.
 # 결과: docs/verification/raw/08_*.json|txt (git 제외). 표는 08_summarize.py가 만든다.
-# 사용: [PREFIX=08] 08_overhead.sh [reps]   (재실행 안전: 같은 이름 파일을 덮어쓴다)
+# 사용: GSO_GPU=<nvidia-smi GPU 인덱스> [PREFIX=08] 08_overhead.sh [reps] (GSO_GPU 기본값 없음; 재실행 안전: 같은 이름 파일을 덮어쓴다)
 # PREFIX: 출력 파일 이름 접두어(기본 08). 시험 실행은 다른 값을 줘서 측정 데이터를 덮어쓰지 않게 한다.
-# 종료 시(오류, Ctrl-C, SIGTERM 포함) 이 스크립트가 띄운 프로세스를 모두 종료하고 DCGM 컨테이너를 지운다.
+# 종료 시(오류, Ctrl-C, SIGTERM 포함) 이 스크립트가 띄운 프로세스를 모두 종료하고, 이 스크립트가
+# 직접 만든 DCGM 컨테이너만 지운다(이미 있던 gso-dcgm 컨테이너는 건드리지 않고 DCGM 조건을 건너뛴다).
 # sudo, MPS 데몬은 쓰지 않는다.
 set -u
 
@@ -14,7 +15,15 @@ HERE="$ROOT/scripts/verify"
 REPS="${1:-3}"
 PREFIX="${PREFIX:-08}"
 DUR=30
-GPU=1
+GPU="${GSO_GPU:-}"
+case "$GPU" in
+    '' | *[!0-9]*)
+        echo "error: set GSO_GPU to the GPU index (nvidia-smi numbering); there is no default" >&2
+        echo "usage: GSO_GPU=<gpu index> [PREFIX=08] $0 [reps]" >&2
+        exit 2 ;;
+esac
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+STARTED_DCGM=0
 mkdir -p "$RAW"
 cd "$ROOT" || exit 1
 
@@ -31,7 +40,9 @@ cleanup() {
     for p in $WL_PIDS; do killtree "$p"; done
     wait 2>/dev/null
     # 컨테이너 안의 dcgmi dmon은 컨테이너를 지우면 함께 끝난다(docker exec 클라이언트는 위에서 종료).
-    "$HERE/03_dcgm.sh" stop >/dev/null 2>&1
+    if [ "$STARTED_DCGM" = 1 ]; then
+        "$HERE/03_dcgm.sh" stop >/dev/null 2>&1
+    fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -119,7 +130,19 @@ run_one() { # $1 조건 $2 반복
 }
 
 need_dcgm=1
-"$HERE/03_dcgm.sh" start || { echo "DCGM 컨테이너 시작 실패" >&2; need_dcgm=0; }
+if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx gso-dcgm; then
+    echo "gso-dcgm 컨테이너가 이미 있다(이 스크립트가 만든 것이 아님). 건드리지 않고 DCGM 조건을 건너뛴다." >&2
+    need_dcgm=0
+else
+    if GSO_DCGM_GPU="$GPU" "$HERE/03_dcgm.sh" start; then
+        STARTED_DCGM=1
+    else
+        echo "DCGM 컨테이너 시작 실패" >&2
+        # start가 컨테이너를 만든 뒤 실패했을 수 있다: 그 경우 우리 것이므로 정리 대상이다.
+        docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx gso-dcgm && STARTED_DCGM=1
+        need_dcgm=0
+    fi
+fi
 
 for r in $(seq 1 "$REPS"); do
     for cond in none dcgm nsys; do

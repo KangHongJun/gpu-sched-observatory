@@ -14,3 +14,9 @@ def test_summarize():
     assert s["iterations"] == 200
     assert s["throughput_per_s"] == 100.0
     assert s["latency_ms"] == {"p50": 10.0, "p95": 10.0, "p99": 10.0}
+
+
+def test_summarize_zero_elapsed_throughput_is_unknown():
+    s = summarize([1.0, 2.0], duration_s=0.0)
+    assert s["throughput_per_s"] is None  # unknown, not a measured 0.0
+    assert s["iterations"] == 2

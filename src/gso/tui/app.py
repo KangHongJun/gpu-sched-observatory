@@ -38,6 +38,7 @@ from gso.tui.widgets import (
     sparkline,
 )
 
+MPS_SERVER_COMM = "nvidia-cuda-mps-server"
 _S = 1_000_000_000
 HISTORY_S = 60
 NOTICE_S = 5
@@ -91,6 +92,7 @@ class GsoApp(App):
         gpu_index: int,
         collector=None,
         interval_s: float = 1.0,
+        dcgm_interval_ms: int = 1000,
         clock_ns=time.time_ns,
         capture_runner: CaptureRunner | None = None,
         capture_duration_s: int = 10,
@@ -103,7 +105,8 @@ class GsoApp(App):
         self._collector = collector
         self._interval_s = interval_s
         self._clock_ns = clock_ns
-        self._max_age_ns = int(3 * interval_s * _S)
+        # a value is stale after three missed samples of the slower of the two sources
+        self._max_age_ns = int(3 * max(interval_s, dcgm_interval_ms / 1000) * _S)
         self._notice: tuple[str, int] | None = None
         self._runner = capture_runner or run_global_capture
         self._capture_duration_s = capture_duration_s
@@ -246,12 +249,21 @@ class GsoApp(App):
     def _cstatus(self):
         return self._collector.status if self._collector is not None else None
 
-    def _mps_state(self, cst) -> str:
+    def _mps_state(self, rows, cst) -> str:
+        """Per watched GPU, from its NVML process list: ON when any process there is an MPS
+        client or the MPS server. The host-wide control-pipe answer is not the GPU's state."""
+        if cst is not None and cst.nvml_error is not None:
+            return NA
+        names = cst.process_names if cst is not None else {}
+        for r in rows:
+            if r.is_mps or names.get(r.pid) == MPS_SERVER_COMM:
+                return "ON"
+        return "OFF"
+
+    def _mps_host_daemon(self, cst) -> bool:
         if cst is not None and cst.mps is not None:
-            return "ON" if cst.mps.active else "OFF"
-        if self._caps.mps_active:
-            return "ON"
-        return NA if cst is not None else "OFF"
+            return cst.mps.active
+        return self._caps.mps_active
 
     def _gpu_name(self, cst) -> str:
         if cst is not None and cst.gpu_name:
@@ -271,12 +283,17 @@ class GsoApp(App):
             r = latest(recs, metric, None, now_ns=now, max_age_ns=age)
             return None if r is None else r.value
 
-        mps_state = self._mps_state(cst)
+        names = dict(cst.process_names) if cst is not None else {}
+        rows = process_rows(recs, names, now, self._max_age_ns)
+        mps_state = self._mps_state(rows, cst)
+        mps_text = f"MPS {mps_state}"
+        if mps_state != "ON" and self._mps_host_daemon(cst):
+            mps_text += " (MPS daemon on host)"
         header = " | ".join(
             [
                 f"GPU {self._gpu_index}",
                 self._gpu_name(cst),
-                f"MPS {mps_state}",
+                mps_text,
                 fmt_temp(val("gpu.temp")),
                 fmt_power(val("gpu.power")),
             ]
@@ -293,14 +310,12 @@ class GsoApp(App):
         )
 
         self.query_one("#proc-table", Static).update(
-            self._process_text(recs, cst, now, mps_state == "ON")
+            self._process_text(rows, recs, now, mps_state == "ON")
         )
         self.query_one("#history", Static).update(self._history_text(recs, now))
         self.query_one("#status", Static).update(self._status_text(cst, now))
 
-    def _process_text(self, recs: list[Record], cst, now: int, mps_on: bool) -> str:
-        names = dict(cst.process_names) if cst is not None else {}
-        rows = process_rows(recs, names, now, self._max_age_ns)
+    def _process_text(self, rows, recs: list[Record], now: int, mps_on: bool) -> str:
         rates = self._ctx_rates() if not mps_on else {}
         note = ""
         if self._capture_report is not None and not mps_on:

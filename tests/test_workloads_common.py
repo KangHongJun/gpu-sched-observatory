@@ -153,6 +153,20 @@ def test_run_cli_throughput_only_has_null_latencies(tmp_path, monkeypatch):
     assert d["fps"] == 250.0
 
 
+def test_run_cli_throughput_only_zero_elapsed_is_null(tmp_path, monkeypatch):
+    out = tmp_path / "o.json"
+    monkeypatch.setattr(_common, "select_gpu", lambda n: None)
+    rc = _common.run_cli(
+        "x",
+        "d",
+        lambda p: None,
+        lambda a, s: _common.ThroughputOnly(500, 0.0, {}),
+        ["--gpu", "0", "--duration", "1", "--out", str(out)],
+    )
+    assert rc == 0
+    assert json.loads(out.read_text())["throughput_per_s"] is None
+
+
 def test_run_cli_interrupted_exception_exits_130_no_json(tmp_path, monkeypatch):
     out = tmp_path / "o.json"
     monkeypatch.setattr(_common, "select_gpu", lambda n: None)

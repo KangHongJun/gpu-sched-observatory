@@ -178,10 +178,29 @@ async def test_process_table_rows():
         assert all(r.rstrip().endswith("N/A") and "N/A (MPS)" not in r for r in rows)
 
 
-async def test_process_table_mps_active_from_caps():
+class _C:
+    def __init__(self, status):
+        self.status = status
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+
+def mps_buffer(is_mps=1.0, pids=(1420, 1421)):
     buf = full_buffer()
-    add_procs(buf)
-    app = make_app(buf, caps(mps=True))
+    for pid in pids:
+        put(buf, "proc.sm_util", 8.0, pid=pid)
+        put(buf, "proc.mem_used", 100.0, pid=pid)
+        put(buf, "proc.is_mps", is_mps if pid == pids[0] else 0.0, pid=pid)
+    return buf
+
+
+async def test_mps_client_on_watched_gpu_is_on_and_ctx_na():
+    # another user's MPS client: the control pipe cannot see it, NVML can
+    app = make_app(mps_buffer(), collector=_C(CollectorStatus(mps=None)))
     async with app.run_test() as pilot:
         await settle(pilot)
         rows = text(app, "proc-table").splitlines()[1:]
@@ -189,24 +208,56 @@ async def test_process_table_mps_active_from_caps():
         assert "MPS ON" in text(app, "header")
 
 
-async def test_process_table_mps_active_from_collector_status():
-    buf = full_buffer()
-    add_procs(buf)
-
-    class C:
-        status = CollectorStatus(mps=MpsStatus(True, [1], [2], None))
-
-        def start(self):
-            pass
-
-        def stop(self):
-            pass
-
-    app = make_app(buf, collector=C())
+async def test_mps_server_process_on_watched_gpu_is_on():
+    buf = mps_buffer(is_mps=0.0)
+    status = CollectorStatus(process_names={1420: "nvidia-cuda-mps-server"})
+    app = make_app(buf, collector=_C(status))
     async with app.run_test() as pilot:
         await settle(pilot)
-        assert "N/A (MPS)" in text(app, "proc-table")
         assert "MPS ON" in text(app, "header")
+        assert "N/A (MPS)" in text(app, "proc-table")
+
+
+async def test_mps_elsewhere_only_is_off_for_watched_gpu():
+    # host-wide control-pipe query and caps say a daemon exists; nothing on this GPU is MPS
+    buf = mps_buffer(is_mps=0.0)
+    status = CollectorStatus(mps=MpsStatus(True, [1], [2], None))
+    app = make_app(buf, caps(mps=True), collector=_C(status))
+    async with app.run_test() as pilot:
+        await settle(pilot)
+        h = text(app, "header")
+        assert "MPS OFF" in h and "MPS ON" not in h
+        assert "MPS daemon on host" in h  # secondary text only
+        assert "N/A (MPS)" not in text(app, "proc-table")
+
+
+async def test_no_processes_is_off_even_with_host_daemon():
+    app = make_app(
+        full_buffer(),
+        caps(mps=True),
+        collector=_C(CollectorStatus(mps=MpsStatus(True, [1], [], None))),
+    )
+    async with app.run_test() as pilot:
+        await settle(pilot)
+        h = text(app, "header")
+        assert "MPS OFF" in h and "MPS daemon on host" in h
+
+
+async def test_no_processes_no_daemon_is_off_without_note():
+    app = make_app(full_buffer())
+    async with app.run_test() as pilot:
+        await settle(pilot)
+        h = text(app, "header")
+        assert "MPS OFF" in h and "daemon" not in h
+
+
+async def test_nvml_failure_shows_mps_na():
+    app = make_app(
+        full_buffer(), collector=_C(CollectorStatus(nvml_error="NVMLError: boom"))
+    )
+    async with app.run_test() as pilot:
+        await settle(pilot)
+        assert "MPS N/A" in text(app, "header")
 
 
 async def test_dropped_process_value_shows_na_in_cell():

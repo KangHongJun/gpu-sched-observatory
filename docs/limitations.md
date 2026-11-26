@@ -114,7 +114,12 @@ without root. Nothing was re-verified on other GPUs, drivers or nsys versions.
 
 - **MPS detection.** A GPU counts as MPS ON when the NVML/`nvidia-smi` process list shows
   `nvidia-cuda-mps-server` or a process of type `M` / `M+C`. MPS control commands work only
-  for the user who owns the control pipe, so they are not used for detection.
+  for the user who owns the control pipe, so they are not used for the GPU's state. The
+  header's `MPS ON/OFF` and the `N/A (MPS)` rule for CTX SW/s come from the watched GPU's
+  own process list. An MPS daemon with no processes on the watched GPU is therefore not
+  visible per GPU and shows `MPS OFF`; if the host-wide control query finds a daemon, the
+  header adds the secondary text `MPS daemon on host`. `MPS N/A` means the process list
+  could not be read.
 - **CTX SW/s is `N/A (MPS)` on an MPS GPU.** In the test run, MPS ON produced 0 context
   switch events on the GPU against about 205,000 with MPS OFF. Zero events cannot be told
   apart from "not recorded", so gso does not print `0/s`.

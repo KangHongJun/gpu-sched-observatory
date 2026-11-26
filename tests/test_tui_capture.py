@@ -4,6 +4,7 @@ import time
 
 from textual.widgets import Static
 
+from gso.record import Quality, Record, Scope
 from gso.trace.nsys_capture import CaptureCancelled, CaptureError, CaptureUnavailable
 from gso.tui.app import GsoApp
 from gso.tui.capture_job import CaptureReport
@@ -113,7 +114,11 @@ async def test_confirm_text_is_honest():
         assert (
             "on-demand capture" in t and "5 s" in t and "GPU 1" in t and "GLOBAL" in t
         )
-        assert "7 %" in t
+        flat = " ".join(t.split())
+        assert "about -7 %" in flat and "30 s run" in flat
+        assert "larger and was not measured" in flat
+        assert "every GPU" in flat and "every user's processes" in flat
+        assert "roughly 7 %" not in flat
         assert "real-time" not in t.lower() and "실시간" not in t
         await pilot.click("#capture-cancel")
 
@@ -137,7 +142,20 @@ async def test_cancel_runs_nothing():
 
 
 async def test_mps_overrides_ctx_column():
-    app = make(FakeRunner(), caps(mps=True))
+    app = make(FakeRunner())
+    app._buffer.push(
+        Record(
+            NOW,
+            "GPU-test-0001",
+            "proc.is_mps",
+            1.0,
+            "",
+            "t",
+            Scope.PROCESS,
+            Quality.MEASURED,
+            pid=1420,
+        )
+    )
     async with app.run_test(size=(120, 35)) as pilot:
         await settle(pilot)
         await start_capture(app, pilot)

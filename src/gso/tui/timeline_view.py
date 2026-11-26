@@ -15,8 +15,13 @@ from gso.tui.capture_job import CaptureReport
 
 NO_CAPTURE = "no capture yet — press F4"
 THROUGHPUT_COST = (
-    "roughly 7 % throughput cost during the capture "
-    "(measured ≈7 % on a 30 s average in verification, one workload)"
+    "measured cost: about -7 % throughput averaged over a 30 s run that contained "
+    "the capture (one workload); the cost inside the capture window is larger and "
+    "was not measured"
+)
+GLOBAL_SCOPE = (
+    "the on-demand global capture records context switches for every GPU and "
+    "every user's processes on this machine (the view shows GPU {gpu})"
 )
 
 
@@ -53,9 +58,8 @@ class ConfirmCaptureScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         msg = (
-            f"on-demand capture, {self._duration_s} s, GPU {self._gpu}, "
-            "GLOBAL mode (context switches of external processes), "
-            f"{THROUGHPUT_COST}."
+            f"on-demand capture, {self._duration_s} s, GLOBAL mode: "
+            f"{GLOBAL_SCOPE.format(gpu=self._gpu)}. {THROUGHPUT_COST}."
         )
         with Vertical(id="confirm-box"):
             yield Static(msg, id="confirm-text", markup=False)

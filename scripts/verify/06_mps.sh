@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# G4 검증: GPU 1 전용 사용자 범위 CUDA MPS 데몬 관리.
+# G4 검증: GSO_GPU 하나 전용 사용자 범위 CUDA MPS 데몬 관리.
+# 사용: GSO_GPU=<nvidia-smi GPU 인덱스> 06_mps.sh start|stop|status|env   (기본값 없음: 호출자가 고른다)
+#   start는 그 GPU에 compute 프로세스가 하나라도 있으면 거부한다(다른 사용자의 작업일 수 있다).
 #   start    데몬 시작 (이미 nvidia-cuda-mps-control 프로세스가 있으면 거부)
 #   stop     우리 pipe 디렉터리로만 quit을 보내고 이 사용자의 nvidia-cuda-mps 프로세스가 없는지 확인
 #   status   우리 pipe 디렉터리 기준 get_server_list와 프로세스 목록
@@ -8,6 +10,14 @@
 #   (start는 MpsSession의 session.lock이 잡혀 있으면 거부한다).
 # 시스템 기본 pipe 디렉터리(/tmp/nvidia-mps)와 GPU compute mode는 건드리지 않는다. sudo 없음.
 set -euo pipefail
+
+usage() { echo "usage: GSO_GPU=<gpu index> $0 start|stop|status|env" >&2; exit 2; }
+GPU="${GSO_GPU:-}"
+case "$GPU" in
+  ''|*[!0-9]*) echo "error: set GSO_GPU to the GPU index (nvidia-smi numbering); there is no default" >&2; usage ;;
+esac
+# CUDA_VISIBLE_DEVICES=$GPU 가 nvidia-smi와 같은 보드를 가리키도록 PCI 순서를 고정한다.
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 BASE="/tmp/gso-mps-$(id -u)"
 PIPE="$BASE/pipe"
@@ -42,13 +52,23 @@ case "${1:-}" in
       echo "$existing" >&2
       exit 1
     fi
+    # 이 GPU에 이미 compute 프로세스가 있으면(다른 사용자 포함) 시작하지 않는다. 조회 실패도 거부.
+    if ! apps="$(nvidia-smi -i "$GPU" --query-compute-apps=pid,process_name --format=csv,noheader 2>&1)"; then
+      echo "refuse: cannot query compute processes on GPU $GPU: $apps" >&2
+      exit 1
+    fi
+    if [ -n "$(printf '%s' "$apps" | tr -d '[:space:]')" ]; then
+      echo "refuse: GPU $GPU has compute processes; not starting an MPS daemon for it:" >&2
+      echo "$apps" >&2
+      exit 1
+    fi
     prepare_base
     if [ -e "$BASE/session.lock" ] && ! flock -n "$BASE/session.lock" true; then
       echo "refuse: a gso MPS session (MpsSession) holds $BASE/session.lock" >&2
       exit 1
     fi
-    # 데몬은 GPU 1만 볼 수 있다.
-    CUDA_VISIBLE_DEVICES=1 CUDA_MPS_PIPE_DIRECTORY="$PIPE" CUDA_MPS_LOG_DIRECTORY="$LOG" "$CTL" -d
+    # 데몬은 GSO_GPU 하나만 볼 수 있다.
+    CUDA_VISIBLE_DEVICES="$GPU" CUDA_MPS_PIPE_DIRECTORY="$PIPE" CUDA_MPS_LOG_DIRECTORY="$LOG" "$CTL" -d
     sleep 1
     mine
     ;;
@@ -78,5 +98,5 @@ case "${1:-}" in
     echo "export CUDA_MPS_LOG_DIRECTORY=$LOG"
     ;;
   *)
-    echo "usage: $0 start|stop|status|env" >&2; exit 2 ;;
+    usage ;;
 esac

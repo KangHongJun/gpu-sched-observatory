@@ -66,6 +66,7 @@ scripts/verify/04_nsys_ctxsw.sh export ctx_baseline
 
 ```bash
 cd <repo>
+export GSO_GPU=<GPU index>   # no default; start refuses if that GPU already has any compute process
 scripts/verify/06_mps.sh start
 eval "$(scripts/verify/06_mps.sh env)"
 for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 0 --duration 30 --out docs/verification/raw/06_root_on_$n.json & done; wait
@@ -84,7 +85,7 @@ scripts/verify/04_nsys_ctxsw.sh export ctx_mps_on_root
 터미널 1에서 워크로드가 끝난 뒤 데몬 종료와 확인:
 
 ```bash
-scripts/verify/06_mps.sh stop
+GSO_GPU=<GPU index> scripts/verify/06_mps.sh stop
 pgrep -u "$USER" -a nvidia-cuda-mps   # 비어 있어야 한다
 ```
 
@@ -228,7 +229,7 @@ for n in a b; do uv run python -m gso.bench.workloads.small_kernels --gpu 1 --du
 **판정: 잠정.** 비루트 전역 캡처에서 MPS ON의 GPU 1 컨텍스트 전환 이벤트는 클라이언트 2개가 돌 때 0건이었다(`raw/06_derive.txt`). root 캡처로도 같은지는 미확인이라 "사용자 실행 대기"에 두었다. 모든 수치는 같은 날, 같은 스크립트, 같은 워크로드(2프로세스, 30초, 캡처 10초)로 얻었다.
 
 ### 데몬과 명령
-- `scripts/verify/06_mps.sh start|stop|status|env`: 사용자 범위, `CUDA_VISIBLE_DEVICES=1`로 GPU 1 전용, pipe/log 디렉터리는 `/tmp/gso-mps-<uid>/` 아래. `start`는 어떤 사용자의 MPS 제어 데몬/서버든 이미 있으면 거부한다: 15자로 잘린 comm(`pgrep -x nvidia-cuda-mps`)과 전체 명령줄(`pgrep -f`, `nvidia-cuda-mps-(control|server)`)을 둘 다 검사한다(오탐은 허용). 처음 쓴 `pgrep nvidia-cuda-mps-control`은 comm이 15자로 잘려 실제 데몬을 못 찾는 것이 리뷰에서 확인되어 고쳤고, 실제 데몬 없이 이름만 같은 대역 프로세스로 거부 동작을 확인했다(`raw/06_fix1_guard.txt`). 첫 실행의 시작 전 확인(MPS 프로세스 없음)은 손으로 했다. `/tmp/gso-mps-<uid>`는 mode 700으로 만들고, 심볼릭 링크이거나 현재 사용자 소유 디렉터리가 아니면 거부한다. `stop`은 우리 pipe 디렉터리에만 `quit`을 보낸 뒤 이 사용자의 `nvidia-cuda-mps` 프로세스가 없는지 확인한다. 시작 전 MPS 프로세스 없음, GPU 1 유휴(0%, 1 MiB)를 확인했다. 시스템 기본 pipe 디렉터리, compute mode, sudo는 쓰지 않았다(compute mode는 전 GPU Default 그대로).
+- `scripts/verify/06_mps.sh start|stop|status|env`(리뷰 후 수정: 이제 `GSO_GPU=<인덱스>`가 필수이고 기본값이 없다. `CUDA_DEVICE_ORDER=PCI_BUS_ID`를 고정하고, 그 GPU에 compute 프로세스가 있으면 `start`를 거부한다. 아래 실행 기록은 수정 전 GPU 1 고정 버전으로 한 것이다): 사용자 범위, `CUDA_VISIBLE_DEVICES=1`로 GPU 1 전용, pipe/log 디렉터리는 `/tmp/gso-mps-<uid>/` 아래. `start`는 어떤 사용자의 MPS 제어 데몬/서버든 이미 있으면 거부한다: 15자로 잘린 comm(`pgrep -x nvidia-cuda-mps`)과 전체 명령줄(`pgrep -f`, `nvidia-cuda-mps-(control|server)`)을 둘 다 검사한다(오탐은 허용). 처음 쓴 `pgrep nvidia-cuda-mps-control`은 comm이 15자로 잘려 실제 데몬을 못 찾는 것이 리뷰에서 확인되어 고쳤고, 실제 데몬 없이 이름만 같은 대역 프로세스로 거부 동작을 확인했다(`raw/06_fix1_guard.txt`). 첫 실행의 시작 전 확인(MPS 프로세스 없음)은 손으로 했다. `/tmp/gso-mps-<uid>`는 mode 700으로 만들고, 심볼릭 링크이거나 현재 사용자 소유 디렉터리가 아니면 거부한다. `stop`은 우리 pipe 디렉터리에만 `quit`을 보낸 뒤 이 사용자의 `nvidia-cuda-mps` 프로세스가 없는지 확인한다. 시작 전 MPS 프로세스 없음, GPU 1 유휴(0%, 1 MiB)를 확인했다. 시스템 기본 pipe 디렉터리, compute mode, sudo는 쓰지 않았다(compute mode는 전 GPU Default 그대로).
 - MPS OFF: `small_kernels --gpu 1 --duration 30` 두 개(`raw/06_off_a.json`, `06_off_b.json`)를 띄우고 14초 뒤 `capture ctx_mps_off 10`, `export ctx_mps_off`.
 - MPS ON: `eval "$(scripts/verify/06_mps.sh env)"` 뒤 `small_kernels --gpu 0 --duration 30` 두 개(`raw/06_on_a.json`, `06_on_b.json`)를 띄우고 12초 뒤 `nvidia-smi`와 `get_*` 명령을 실행, 이어서 `capture ctx_mps_on 10`, `export ctx_mps_on`.
 
@@ -302,7 +303,7 @@ CUPTI 13.x(헤더·라이브러리 모두 API 버전 130202). 프로젝트 venv�
 **판정: 통과(이 워크로드·n=3 기준).** DCGM 100 ms 수집의 오버헤드는 측정 변동 이내이고, nsys 비루트 전역 캡처는 30초 평균 처리량을 낮추지만 10초 캡처 구간 안의 오버헤드는 구하지 못했다.
 
 ### 방법
-- 스크립트 `scripts/verify/08_overhead.sh`(전체 행렬, 종료 시 DCGM 컨테이너를 trap으로 정리), 표는 `scripts/verify/08_summarize.py`(표준 라이브러리, 평균과 표본 표준편차). 원본 `raw/08_*`(git 제외), 표 출력은 `raw/08_summary.txt`.
+- 스크립트 `scripts/verify/08_overhead.sh`(전체 행렬. 리뷰 후 수정: `GSO_GPU=<인덱스>`가 필수이고 기본값이 없다 — 실행 기록은 GPU 1 고정 버전. DCGM 컨테이너는 이 스크립트가 만든 경우에만 trap으로 정리하고 `GSO_DCGM_GPU`로 같은 GPU를 넘긴다; 사용: `GSO_GPU=<인덱스> scripts/verify/08_overhead.sh [reps]`), 표는 `scripts/verify/08_summarize.py`(표준 라이브러리, 평균과 표본 표준편차). 원본 `raw/08_*`(git 제외), 표 출력은 `raw/08_summary.txt`.
 - 워크로드는 매번 `small_kernels --gpu 1 --duration 30` 두 프로세스를 한 줄에서 동시에 시작(MPS OFF, GPU 1만). 조건을 번갈아(none, dcgm, nsys) 3회씩 실행했고, 실행 사이에 GPU 1이 유휴이고 온도가 시작 온도(32 °C) +3 °C 이내가 될 때까지(최대 60초) 기다렸다.
 - `none`: 프로파일러 없음. `dcgm`: `scripts/verify/03_dcgm.sh`로 컨테이너를 올리고 `dcgmi dmon -i 0 -e 1001,1002,1003,1004,1005 -d 100 -c 300`을 워크로드와 동시에 실행(컨테이너는 3회 동안 유지). `nsys`: 워크로드 시작 10초 뒤 `04_nsys_ctxsw.sh capture <이름> 10`(비루트 전역 캡처, 10초). root 캡처는 범위 밖이다.
 - 실행 시작 온도(°C): none 32/35/35, dcgm 35/35/35, nsys 35/35/35(반복 1/2/3 순서). 마지막 동시 실행은 냉각 대기 시간 초과 뒤 39 °C에서 시작했다(`raw/08_order.txt`).

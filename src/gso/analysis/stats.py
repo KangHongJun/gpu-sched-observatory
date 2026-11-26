@@ -17,7 +17,7 @@ def summarize(latencies_ms: list[float], duration_s: float) -> dict:
     n = len(latencies_ms)
     return {
         "iterations": n,
-        "throughput_per_s": n / duration_s if duration_s > 0 else 0.0,
+        "throughput_per_s": n / duration_s if duration_s > 0 else None,
         "latency_ms": {
             "p50": percentile(latencies_ms, 50),
             "p95": percentile(latencies_ms, 95),

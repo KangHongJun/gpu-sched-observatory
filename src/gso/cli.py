@@ -119,6 +119,7 @@ def build_live(args):
         args.gpu,
         collector=collector,
         interval_s=args.interval,
+        dcgm_interval_ms=args.dcgm_interval_ms,
         bench_dir=args.bench_dir,
     )
 
@@ -173,9 +174,13 @@ def run_headless(args, sleep=time.sleep, clock=time.monotonic) -> int:
     committed = False
     try:
         try:
-            buffer, _caps, collector = build_collection(args)
+            buffer, caps, collector = build_collection(args)
         except KeyboardInterrupt:
             return EXIT_INTERRUPTED  # nothing collected, nothing to flush
+        if not any(g.index == args.gpu for g in caps.gpus):
+            detail = f": {caps.nvml_error}" if caps.nvml_error else ""
+            print(f"gso: GPU {args.gpu} not found{detail}", file=sys.stderr)
+            return 1  # nothing written; do not idle for the whole duration
         drainer = Drainer(buffer, stream)
         t0 = clock()
         try:
