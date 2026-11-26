@@ -208,3 +208,42 @@ def test_mixed_masked_header_line(monkeypatch):
     n = s["ctx"]["masked_restore_events"]
     assert n >= 1
     assert f"masked contexts not shown: {n} restore events" in tl
+
+
+def _hand_built(path, events):
+    """events: (timestamp_ns, pid or None, tag) on gpu 1."""
+    c = sqlite3.connect(path)
+    c.execute(
+        "CREATE TABLE GPU_CONTEXT_SWITCH_EVENTS (timestamp INTEGER, gpuId INTEGER,"
+        " contextId INTEGER, globalPid INTEGER, tag INTEGER, seqNo INTEGER)"
+    )
+    for i, (ts, pid, tag) in enumerate(events):
+        gp = (1 << 48) if pid is None else pid << 24
+        c.execute("INSERT INTO GPU_CONTEXT_SWITCH_EVENTS VALUES (?,1,1,?,?,?)", (ts, gp, tag, i))
+    c.commit()
+    c.close()
+
+
+def test_zoom_is_clipped_to_the_capture_window(tmp_path):
+    p = tmp_path / "c.sqlite"
+    _hand_built(p, [(1_000_000, 100, 8), (3_000_000, 200, 8)])  # w1 = 3 ms; anchor 2 ms before
+    _, tl = build_report(p, gpu=1, mode="global", masked=True)
+    rows = _zoom_rows(tl, "hold")
+    assert rows and all(len(r) == 40 for r in rows)  # 2 ms / 50 us
+    assert "+0.001 s .. +2.000 ms, 1 cell = 50 µs" in tl
+    assert "+5 ms" not in tl
+
+
+def test_zoom_anchor_at_or_after_window_end_is_na(tmp_path):
+    p = tmp_path / "c.sqlite"
+    _hand_built(p, [(5_000_000, 100, 8)])  # the only restore is at w1
+    _, tl = build_report(p, gpu=1, mode="global", masked=True)
+    zoom = tl[tl.index("[restore_save zoom]") : tl.index("[hold zoom]")]
+    assert "N/A" in zoom and "|" not in zoom
+
+
+def test_zoom_label_offset_is_relative_to_window_start(tmp_path):
+    p = tmp_path / "c.sqlite"
+    _hand_built(p, [(1_500_000_000, 100, 8), (1_520_000_000, 200, 8)])
+    _, tl = build_report(p, gpu=1, mode="global", masked=True)
+    assert "zoom: +1.500 s .. +5.000 ms, 1 cell = 50 µs" in tl

@@ -190,13 +190,13 @@ def build_report(
         }
         first = next(
             (e.ts_ns for e in events if e.tag == _RESTORE_START and e.pid is not None
-             and e.ts_ns >= w0),
+             and w0 <= e.ts_ns < w1),
             None,
         )
         blocks += [(f"{c} zoom", by_c[c], first) for c in CONSTRUCTIONS]
         blocks += [(c, by_c[c], None) for c in CONSTRUCTIONS]
     else:
-        first = min((s for ivl in by_pid.values() for s, _ in ivl), default=None)
+        first = min((s for ivl in by_pid.values() for s, _ in ivl if s < w1), default=None)
         blocks += [("kernels zoom", by_pid, first), ("kernels", by_pid, None)]
     return summary, _timeline_text(summary, window, blocks, masked_restores)
 
@@ -235,14 +235,15 @@ def _timeline_text(
         zoom = name.endswith(" zoom")
         if zoom:
             title = f"[{name}] {_BLOCK_HELP[base]}"
-            if zoom_start is None or w1 <= w0:
+            if zoom_start is None or not w0 <= zoom_start < w1:
                 t0 = t1 = 0
-                title += "; zoom: N/A (no start event in the capture)"
+                title += "; zoom: N/A (no start event before the capture end)"
             else:
                 t0 = zoom_start
-                t1 = t0 + ZOOM_CELLS * ZOOM_CELL_NS
-                title += (f"; zoom: +{t0 / 1e9:.3f} s .. +5 ms, 1 cell = "
-                          f"{ZOOM_CELL_NS // 1000} µs")
+                t1 = min(t0 + ZOOM_CELLS * ZOOM_CELL_NS, w1)
+                zoom_cells = max(1, (t1 - t0) // ZOOM_CELL_NS)
+                title += (f"; zoom: +{(t0 - w0) / 1e9:.3f} s .. +{(t1 - t0) / 1e6:.3f} ms, "
+                          f"1 cell = {ZOOM_CELL_NS // 1000} µs")
         else:
             t0, t1 = w0, w1
             title = f"[{name}] {_BLOCK_HELP[name]}; '=' = overlaps the cell"
@@ -257,12 +258,15 @@ def _timeline_text(
         if zoom and t1 <= t0:
             lines.append(f"  {NA}")
             continue
-        rows = render_timeline({k: by_key[k] for k in keys}, t0, t1, width)
+        cells = zoom_cells if zoom else width
+        if zoom:
+            t1 = t0 + cells * ZOOM_CELL_NS  # whole cells inside the window (at least one)
+        rows = render_timeline({k: by_key[k] for k in keys}, t0, t1, cells)
         for k in keys:
             lines.append(f"{k:>8} |{rows[k]}|")
         if zoom:
-            end = "+5 ms"
-            lines.append(" " * 10 + "+0".ljust(width - len(end)) + end)
+            end = f"+{cells * ZOOM_CELL_NS / 1e6:.3f} ms"
+            lines.append(" " * 10 + "+0".ljust(cells - len(end)) + end)
         else:
             span = f"{(w1 - w0) / 1e9:.1f} s" if w1 > w0 else NA
             lines.append(" " * 10 + "0.0 s" + span.rjust(width - 5))
