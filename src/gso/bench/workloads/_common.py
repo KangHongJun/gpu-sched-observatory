@@ -13,9 +13,9 @@ CLI 계약: python -m gso.bench.workloads.<name> --gpu N --duration S --out FILE
 
 import argparse
 import contextlib
-import math
 import fcntl
 import json
+import math
 import os
 import signal
 import sys

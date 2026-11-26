@@ -30,8 +30,8 @@ from gso.bench.workloads._common import (
     StopFlag,
     ThroughputOnly,
     WorkloadUnavailable,
-    file_lock,
     current,
+    file_lock,
     record_window,
     run_cli,
 )

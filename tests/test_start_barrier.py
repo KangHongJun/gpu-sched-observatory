@@ -58,7 +58,7 @@ def test_waits_until_start_at_then_measures(tmp_path, monkeypatch):
 
 def test_missed_barrier_exits_1_and_writes_nothing(tmp_path, monkeypatch, capsys):
     fake = FakeClock(1000.0)
-    rc, out = _run(tmp_path, monkeypatch, fake, _measure(fake), ["--start-at", "999.0"])
+    rc, _out = _run(tmp_path, monkeypatch, fake, _measure(fake), ["--start-at", "999.0"])
     assert rc == 1
     err = capsys.readouterr().err.strip()
     assert "start barrier missed" in err and "\n" not in err
@@ -72,7 +72,7 @@ def test_stop_during_wait_writes_nothing(tmp_path, monkeypatch):
         fake.on_sleep = stop.set
         return _measure(fake)(args, stop)
 
-    rc, out = _run(tmp_path, monkeypatch, fake, measure, ["--start-at", "1005.0"])
+    rc, _out = _run(tmp_path, monkeypatch, fake, measure, ["--start-at", "1005.0"])
     assert rc == _common.EXIT_INTERRUPTED
     assert list(tmp_path.iterdir()) == []
 
@@ -103,7 +103,7 @@ def test_window_present_for_throughput_only(tmp_path, monkeypatch):
 
 def test_window_null_when_workload_recorded_none(tmp_path, monkeypatch):
     fake = FakeClock(1000.0)
-    rc, out = _run(tmp_path, monkeypatch, fake, lambda a, s: ([1.0], 1.0, {}))
+    _rc, out = _run(tmp_path, monkeypatch, fake, lambda a, s: ([1.0], 1.0, {}))
     d = json.loads(out.read_text())
     assert d["window_start_ns"] is None and d["window_end_ns"] is None
 
