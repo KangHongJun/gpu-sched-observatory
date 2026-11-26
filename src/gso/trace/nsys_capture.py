@@ -233,7 +233,7 @@ def _exec(run, argv, timeout, env, what: str, ok_codes=(0,)):
         raise CaptureError(f"nsys {what} 시간 초과 (timeout {timeout}s)") from e
     except OSError as e:
         raise CaptureError(f"nsys {what} 실행 실패: {e}") from e
-    if res.returncode not in ok_codes:
+    if ok_codes is not None and res.returncode not in ok_codes:
         raise CaptureError(
             f"nsys {what} 실패 (exit code {res.returncode}):\n{_tail(res.stdout, res.stderr)}"
         )
@@ -278,8 +278,8 @@ def capture(
     실행 중일 수 있고, 그 수명은 호출자 몫이다(실측: 대상은 nsys 종료 후에도 계속 돌고 스스로
     끝난다). 대상이 기간보다 먼저 끝나면 nsys도 그때 끝나므로 실제 캡처는 ``duration_s``보다
     짧을 수 있다. ``end_target=True``면 ``--kill=sigterm``: 기간 끝에 nsys가 대상을 끝내고
-    종료 코드 143으로 끝나며, 보고서가 비어 있지 않고 프로파일 경과 시간이 ``duration_s``
-    이상일 때만 성공(``target_terminated=True``)으로 본다. 그 밖의 143과 다른 비정상 종료는
+    대상의 종료 코드(143, 130, 1 등)로 끝나며, 보고서가 비어 있지 않고 프로파일 경과 시간이 ``duration_s``
+    이상일 때만 성공(``target_terminated=True``)으로 본다. 그 밖의 비정상 종료는
     모두 CaptureError다. ``end_target=True``는 global 모드와 함께 쓸 수 없다(ValueError).
 
     시간 초과나 중단(KeyboardInterrupt)이면 기본 runner가 자신이 만든 프로세스 그룹 전체를,
@@ -315,8 +315,11 @@ def capture(
     started_ns = clock_ns()
     t0 = monotonic()
     terminated = False
+    target_rc = None
     try:
-        ok = (0, _SIGTERM_EXIT) if end_target else (0,)
+        # end_target: nsys는 대상의 종료 코드로 끝난다(143, 130, 1 ...). 코드 자체로는 실패가 아니고
+        # 아래의 새 보고서/기간 검사가 진짜 실패를 가른다.
+        ok = None if end_target else (0,)
         prof = _exec(
             run, profile_argv, duration_s + PROFILE_TIMEOUT_MARGIN_S, env, "profile", ok
         )
@@ -326,14 +329,16 @@ def capture(
                 f"nsys profile (exit code {prof.returncode}) produced no new non-empty {rep.name}:\n"
                 f"{_tail(prof.stdout, prof.stderr)}"
             )
-        if prof.returncode == _SIGTERM_EXIT:
-            # nsys가 기간 끝에 대상을 SIGTERM으로 끝내면 143(실측). 기간을 못 채웠다면 다른 원인.
+        if end_target and prof.returncode != 0:
+            # 기간 끝에 우리가 대상을 끝내면 nsys는 대상의 종료 코드로 끝난다(143, 130, 1 ...).
+            # 기간을 못 채웠다면 대상이 스스로 죽었거나 다른 원인이다.
             if profile_s < duration_s:
                 raise CaptureError(
-                    f"nsys profile exit code {_SIGTERM_EXIT} after {profile_s:.1f}s, "
+                    f"nsys profile exit code {prof.returncode} after {profile_s:.1f}s, "
                     f"before the {duration_s}s duration ended:\n{_tail(prof.stdout, prof.stderr)}"
                 )
             terminated = True
+            target_rc = prof.returncode
         _exec(run, export_argv, EXPORT_TIMEOUT_S, None, "export")
         if not _fresh_nonempty(sqlite, before_sqlite):
             raise CaptureError(
@@ -367,6 +372,7 @@ def capture(
             warnings.append(
                 "end_target 요청대로 캡처 기간 끝에 직접 실행한 대상을 종료시켰습니다."
                 " 대상의 자체 결과 파일은 만들어지지 않을 수 있습니다."
+                f" (대상 종료 코드 {target_rc})"
             )
         mode = "launched"
     return CaptureResult(

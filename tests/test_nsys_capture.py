@@ -401,9 +401,28 @@ def test_143_in_global_mode_is_error(tmp_path):
         cap143(tmp_path, run143(tmp_path), target=None, end_target=False)
 
 
-def test_137_is_error_even_with_end_target(tmp_path):
-    with pytest.raises(CaptureError, match="137"):
-        cap143(tmp_path, run143(tmp_path, rc=137))
+@pytest.mark.parametrize("rc", [130, 1, 137])
+def test_target_exit_code_accepted_when_end_target_and_rep_written(tmp_path, rc):
+    res = cap143(tmp_path, run143(tmp_path, rc=rc))
+    assert res.target_terminated is True
+    assert (tmp_path / "l.nsys-rep").stat().st_size > 0
+    assert any(str(rc) in w for w in res.warnings)
+
+
+def test_target_exit_code_without_rep_is_error_even_with_end_target(tmp_path):
+    with pytest.raises(CaptureError, match="130"):
+        cap143(tmp_path, run143(tmp_path, rep_bytes=b"", rc=130))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_target_exit_code_too_early_is_error(tmp_path):
+    with pytest.raises(CaptureError, match="130"):
+        cap143(tmp_path, run143(tmp_path, rc=130), times=(0.0, 2.0, 3.0))
+
+
+def test_nonzero_exit_without_end_target_still_error(tmp_path):
+    with pytest.raises(CaptureError, match="130"):
+        cap143(tmp_path, run143(tmp_path, rc=130), end_target=False)
 
 
 def test_zero_exit_with_zero_byte_report_is_error(tmp_path):
