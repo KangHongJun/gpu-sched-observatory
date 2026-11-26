@@ -11,3 +11,8 @@ def select_gpu(index: int, environ: MutableMapping[str, str] = os.environ) -> No
     """
     environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     environ["CUDA_VISIBLE_DEVICES"] = str(index)
+
+
+# 존재하고 실행되는 워크로드 모듈 (python -m gso.bench.workloads.<name>).
+# trt_infer는 TensorRT가 설치·동작할 때만 여기에 둔다.
+WORKLOADS = ("small_kernels", "membound", "fp16_matmul", "trt_infer", "decode")
