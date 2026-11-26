@@ -190,6 +190,13 @@ def _timeline_text(summary: dict, window: tuple[int, int], blocks, width: int = 
         "on-demand capture of this window only (not a continuous view)"
     )
     lines = [head]
+    if w1 > w0:
+        cell_ms = (w1 - w0) / 1e6 / width
+        lines.extend(textwrap.wrap(
+            f"1 cell = {cell_ms:.2f} ms; a cell is marked if the interval touches it at all, so "
+            "alternation faster than a cell looks continuous.",
+            width=110,
+        ))
     for name, by_key in blocks:
         lines.append("")
         lines.extend(
