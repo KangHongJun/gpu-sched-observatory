@@ -9,13 +9,16 @@ CLI 계약: python -m gso.bench.workloads.<name> --gpu N --duration S --out FILE
 """
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import signal
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from gso.analysis.stats import summarize
@@ -25,12 +28,30 @@ WARMUP_ITERS = 10
 EXIT_UNAVAILABLE = 1
 EXIT_INTERRUPTED = 130
 
-# (지연 ms 목록, 측정 시간 s, JSON에 더할 추가 키)
-Measured = tuple[list[float], float, dict]
+
+
+@dataclass
+class ThroughputOnly:
+    """지연 분포를 주장하지 않는 워크로드의 결과: 반복 수, 측정 시간 s, 추가 키.
+
+    JSON의 latency_ms는 p50/p95/p99 모두 null, metric_kind는 "throughput_only".
+    """
+
+    iterations: int
+    elapsed_s: float
+    extra: dict = field(default_factory=dict)
+
+
+# (지연 ms 목록, 측정 시간 s, JSON에 더할 추가 키) 또는 ThroughputOnly
+Measured = tuple[list[float], float, dict] | ThroughputOnly
 
 
 class WorkloadUnavailable(Exception):
     """이 장비에서 실행할 수 없는 워크로드(라이브러리 없음, 하드웨어 디코더 없음 등)."""
+
+
+class Interrupted(Exception):
+    """SIGTERM/SIGINT로 중단됨(결과를 쓰지 않는다)."""
 
 
 class StopFlag:
@@ -44,6 +65,10 @@ class StopFlag:
 
     def is_set(self) -> bool:
         return self._event.is_set()
+
+    def raise_if_set(self) -> None:
+        if self.is_set():
+            raise Interrupted
 
     def install(self) -> None:
         signal.signal(signal.SIGTERM, self.set)
@@ -62,6 +87,37 @@ def write_json_atomic(out: str | Path, data: dict) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+@contextlib.contextmanager
+def file_lock(
+    path: Path, stop: StopFlag, on_wait: Callable[[], None]
+) -> Iterator[float]:
+    """`path`에 대한 배타적 flock. 다른 프로세스가 쥐고 있으면 on_wait()를 한 번 부르고 기다린다.
+
+    기다린 시간(s, 기다리지 않았으면 0.0)을 돌려준다. 기다리는 중 중단되면 Interrupted.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        waited = 0.0
+        t0 = time.perf_counter()
+        notified = False
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not notified:
+                    on_wait()
+                    notified = True
+                stop.raise_if_set()
+                time.sleep(0.1)
+        if notified:
+            waited = time.perf_counter() - t0
+        yield waited
+    finally:
+        os.close(fd)  # flock은 fd를 닫으면 풀린다
 
 
 def timed_loop(
@@ -110,15 +166,28 @@ def run_cli(
     stop.install()
     try:
         measured = measure(args, stop)
+    except Interrupted:
+        measured = None
     except WorkloadUnavailable as exc:
         print(f"{name}: unavailable: {exc}".replace("\n", " "), file=sys.stderr)
         return EXIT_UNAVAILABLE
     if measured is None or stop.is_set():
         print(f"{name}: interrupted, no result written", file=sys.stderr)
         return EXIT_INTERRUPTED
-    latencies_ms, elapsed, extra = measured
-    result = summarize(latencies_ms, elapsed)
-    result.update({"workload": name, "pid": os.getpid()})
+    if isinstance(measured, ThroughputOnly):
+        elapsed = measured.elapsed_s
+        result = {
+            "iterations": measured.iterations,
+            "throughput_per_s": measured.iterations / elapsed if elapsed > 0 else 0.0,
+            "latency_ms": {"p50": None, "p95": None, "p99": None},
+        }
+        extra = measured.extra
+        kind = "throughput_only"
+    else:
+        latencies_ms, elapsed, extra = measured
+        result = summarize(latencies_ms, elapsed)
+        kind = "latency"
+    result.update({"workload": name, "pid": os.getpid(), "metric_kind": kind})
     result.update(extra)
     write_json_atomic(args.out, result)
     return 0

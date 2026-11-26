@@ -45,11 +45,18 @@ def test_import_does_not_load_torch(name):
     assert p.returncode == 0, p.stderr
 
 
-def test_workloads_lists_only_runnable_modules():
+def test_workloads_equals_package_modules():
+    import importlib.util
+    import pkgutil
+
+    import gso.bench.workloads as pkg
+
+    mods = {m.name for m in pkgutil.iter_modules(pkg.__path__) if not m.name.startswith("_")}
+    if importlib.util.find_spec("tensorrt") is None:
+        mods.discard("trt_infer")
+    assert set(workloads.WORKLOADS) == mods
     assert isinstance(workloads.WORKLOADS, tuple)
     assert workloads.WORKLOADS[0] == "small_kernels"
     for name in workloads.WORKLOADS:
         p, _ = _run(name, "--help")
         assert p.returncode == 0, (name, p.stderr)
-    for name in ("small_kernels", "membound", "fp16_matmul", "decode"):
-        assert name in workloads.WORKLOADS

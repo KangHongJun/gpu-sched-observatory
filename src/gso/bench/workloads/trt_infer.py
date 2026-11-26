@@ -1,16 +1,22 @@
 """TensorRT 추론 워크로드: torchvision ResNet-50(무작위 가중치), FP16 엔진.
 
 CLI 계약: python -m gso.bench.workloads.trt_infer --gpu N --duration S --out FILE.json [--batch B]
-추가 JSON 키: backend("tensorrt"), batch, precision, trt_version, build_s(엔진 캐시를 쓰면 0)
+추가 JSON 키: backend("tensorrt"), batch, precision, trt_version,
+build_s(엔진 준비에 실제로 쓴 시간: 빌드 또는 다른 프로세스의 빌드 대기 포함, 캐시만 읽었으면 0),
+build_waited_s(그중 다른 프로세스의 빌드를 기다린 시간)
 
 TensorRT가 없거나 엔진을 만들 수 없으면 종료 코드 1과 이유 한 줄, JSON 없음.
 PyTorch 추론으로 대체하지 않는다. TensorRT 11은 strongly typed 네트워크만 지원하므로
 FP16 엔진은 모델을 FP16으로 ONNX에 내보내 만든다. 엔진은 ~/.cache/gso/에
 모델·배치·정밀도·TensorRT 버전을 키로 캐시한다(키가 바뀌면 다시 만든다).
+여러 프로세스가 동시에 시작해도 flock(<key>.lock)으로 한 프로세스만 만들고 나머지는 기다린다.
+ONNX/임시 파일 이름에는 PID를 넣는다. 읽을 수 없는 엔진 파일은 낡은 것으로 보고 한 번 다시 만든다.
 """
 
 import argparse
+import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -18,6 +24,7 @@ from gso.bench.workloads._common import (
     Measured,
     StopFlag,
     WorkloadUnavailable,
+    file_lock,
     run_cli,
     timed_loop,
 )
@@ -65,27 +72,57 @@ def _build_engine(trt, onnx_path: Path) -> bytes:
     return bytes(blob)
 
 
-def _load_or_build(trt, batch: int) -> tuple[bytes, float]:
-    key = cache_key(MODEL, batch, PRECISION, trt.__version__)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    plan = CACHE_DIR / f"{key}.plan"
-    if plan.exists():
-        return plan.read_bytes(), 0.0
-    t0 = time.perf_counter()
-    onnx_path = CACHE_DIR / f"{key}.onnx"
+def _build_plan(trt, plan: Path, key: str, batch: int, stop: StopFlag) -> bytes:
+    onnx_path = CACHE_DIR / f"{key}.{os.getpid()}.onnx"
+    tmp = plan.with_name(f"{plan.name}.{os.getpid()}.tmp")
     try:
-        _export_onnx(onnx_path, batch)
-        blob = _build_engine(trt, onnx_path)
-    except WorkloadUnavailable:
-        raise
-    except Exception as exc:
-        raise WorkloadUnavailable(f"engine build failed: {type(exc).__name__}: {exc}"[:240]) from exc
+        try:
+            _export_onnx(onnx_path, batch)
+            stop.raise_if_set()
+            blob = _build_engine(trt, onnx_path)
+        except WorkloadUnavailable:
+            raise
+        except Exception as exc:  # 어떤 실패든 이유 한 줄로 보고
+            raise WorkloadUnavailable(
+                f"engine build failed: {type(exc).__name__}: {exc}"[:240]
+            ) from exc
+        stop.raise_if_set()
+        tmp.write_bytes(blob)
+        tmp.replace(plan)
+        return blob
     finally:
         onnx_path.unlink(missing_ok=True)
-    tmp = plan.with_name(plan.name + ".tmp")
-    tmp.write_bytes(blob)
-    tmp.replace(plan)
-    return blob, time.perf_counter() - t0
+        tmp.unlink(missing_ok=True)
+
+
+def _load_engine(trt, runtime, batch: int, stop: StopFlag):
+    """캐시된 엔진을 역직렬화한다. 없거나 읽을 수 없으면 (잠금 안에서) 한 번 만든다.
+
+    반환: (engine, build_s, build_waited_s).
+    """
+    key = cache_key(MODEL, batch, PRECISION, trt.__version__)
+    plan = CACHE_DIR / f"{key}.plan"
+
+    def note() -> None:
+        print("trt_infer: waiting for another process's engine build", file=sys.stderr)
+
+    t0 = time.perf_counter()
+    built = False
+    with file_lock(CACHE_DIR / f"{key}.lock", stop, note) as waited:
+        engine = None
+        if plan.exists():
+            engine = runtime.deserialize_cuda_engine(plan.read_bytes())
+            if engine is None:  # 낡은/손상된 엔진: 지우고 다시 만든다
+                plan.unlink(missing_ok=True)
+        if engine is None:
+            blob = _build_plan(trt, plan, key, batch, stop)
+            built = True
+            engine = runtime.deserialize_cuda_engine(blob)
+            if engine is None:
+                plan.unlink(missing_ok=True)
+                raise WorkloadUnavailable("TensorRT engine deserialize failed after rebuild")
+    build_s = time.perf_counter() - t0 if (built or waited > 0) else 0.0
+    return engine, build_s, waited
 
 
 def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
@@ -95,13 +132,10 @@ def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
         raise WorkloadUnavailable(f"tensorrt not installed ({exc})") from exc
     import torch
 
-    blob, build_s = _load_or_build(trt, args.batch)
-    if stop.is_set():
-        return None
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     runtime = trt.Runtime(trt.Logger(trt.Logger.ERROR))
-    engine = runtime.deserialize_cuda_engine(blob)
-    if engine is None:
-        raise WorkloadUnavailable("TensorRT engine deserialize failed")
+    engine, build_s, waited_s = _load_engine(trt, runtime, args.batch, stop)
+    stop.raise_if_set()
     context = engine.create_execution_context()
     x = torch.randn(args.batch, 3, 224, 224, device="cuda", dtype=torch.float16)
     y = torch.empty(args.batch, 1000, device="cuda", dtype=torch.float16)
@@ -120,7 +154,7 @@ def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
         return None
     extra = {
         "backend": "tensorrt", "batch": args.batch, "precision": PRECISION,
-        "trt_version": trt.__version__, "build_s": build_s,
+        "trt_version": trt.__version__, "build_s": build_s, "build_waited_s": waited_s,
     }
     return (*timed, extra)
 
