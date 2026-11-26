@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# DCGM host engine 컨테이너(GPU 1 전용)를 올리고 내리는 도우미.
-# 사용: 03_dcgm.sh start | stop | status | dmon [count]
-# sudo 불필요. docker nvidia 런타임이 필요하다. GPU 0은 절대 노출하지 않는다.
+# DCGM host engine 컨테이너(호스트 GPU 하나 전용)를 올리고 내리는 도우미.
+# 사용: GSO_DCGM_GPU=<호스트 GPU 인덱스> 03_dcgm.sh start | stop | status | dmon [count]
+# sudo 불필요. docker nvidia 런타임이 필요하다. 기본값 없음: 호출자가 GPU를 골라야 한다.
 set -u
 
 IMAGE_TAG="4.8.0-ubuntu24.04"
 IMAGE="nvcr.io/nvidia/cloud-native/dcgm:${IMAGE_TAG}"
 NAME="gso-dcgm"
-HOST_GPU=1
-# 컨테이너 안에서 GPU 1만 보이므로 인덱스는 0으로 열거된다(실측은 RESULTS.md 참고).
+HOST_GPU=${GSO_DCGM_GPU:?set GSO_DCGM_GPU to the host GPU index}
+# 컨테이너 안에서 GPU 하나만 보이므로 인덱스는 0으로 열거된다(실측은 RESULTS.md 참고).
 CONT_GPU=0
 FIELDS="1001,1002,1003,1004,1005"
 
