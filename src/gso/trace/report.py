@@ -26,12 +26,12 @@ from gso.analysis.intervals import (
     switch_rate_is_lower_bound_by_gpu,
 )
 from gso.trace.nsys_sqlite import (
-    _pid_of,
     capture_window,
     ctx_intervals,
     dropped_hints,
     load_ctx_events,
     load_kernels_with_stats,
+    pid_of,
     raw_counts,
 )
 from gso.tui.widgets import NA, render_timeline
@@ -39,6 +39,9 @@ from gso.tui.widgets import NA, render_timeline
 SCHEMA_VERSION = 1
 CONSTRUCTIONS = ("restore_save", "hold")
 TIMELINE_WIDTH = 100
+ZOOM_CELLS = 100
+ZOOM_CELL_NS = 50_000  # 100 cells x 50 us = 5 ms
+UNMAPPED_MARK = "대응시킬 수 없어"  # in the note about kernels whose GPU is unknown
 _RESTORE_START = 8
 
 _BLOCK_HELP = {
@@ -108,8 +111,8 @@ def build_report(
     for c in CONSTRUCTIONS:
         keys |= {k for k in ivs[c] if k[0] == gpu}
     per_context = []
-    for key in sorted(keys, key=lambda k: (_pid_of(k[1]) or 0, k[1])):
-        entry: dict = {"pid": _pid_of(key[1]), "restores_per_s": rps.get(key)}
+    for key in sorted(keys, key=lambda k: (pid_of(k[1]) or 0, k[1])):
+        entry: dict = {"pid": pid_of(key[1]), "restores_per_s": rps.get(key)}
         for c in CONSTRUCTIONS:
             cur = ivs[c].get(key, [])
             entry[c] = {
@@ -132,13 +135,25 @@ def build_report(
     by_pid: dict[int, list[tuple[int, int]]] = {}
     for k in mine:
         by_pid.setdefault(k.pid, []).append((k.start_ns, k.end_ns))
-    kernel = {
-        "count": None if (unresolved and not mine) else len(mine),
-        "duration_ms": summarize_ns(kernel_durations(mine)),
-        "launch_to_start_ms": summarize_ns(launch_to_start_delays(mine)),
-        "ambiguous_api_matches": kstats.ambiguous_api_matches,
-        "pids": sorted(by_pid),
-    }
+    counts = raw_counts(path)
+    measured = mode != "global" and "CUPTI_ACTIVITY_KIND_KERNEL" in counts
+    if measured:
+        kernel = {
+            "count": None if (unresolved and not mine) else len(mine),
+            "duration_ms": summarize_ns(kernel_durations(mine)),
+            "launch_to_start_ms": summarize_ns(launch_to_start_delays(mine)),
+            "ambiguous_api_matches": kstats.ambiguous_api_matches,
+            "pids": sorted(by_pid),
+        }
+    else:  # no kernel data was captured: unknown, not zero
+        empty = {"n": None, "p50_ms": None, "p95_ms": None, "p99_ms": None}
+        kernel = {
+            "count": None,
+            "duration_ms": dict(empty),
+            "launch_to_start_ms": dict(empty),
+            "ambiguous_api_matches": None,
+            "pids": None,
+        }
     overlap = interprocess_overlap(by_pid, w0, w1) if has_window else None
 
     notes = _notes(mode, masked, lower, rate is None and masked_restores > 0)
@@ -165,23 +180,37 @@ def build_report(
         "kernel": kernel,
         "interprocess_overlap": overlap,
         "dropped_hints": dropped_hints(path),
-        "raw_counts": raw_counts(path),
+        "raw_counts": counts,
         "notes": notes,
     }
-    blocks: list[tuple[str, dict[int, list[tuple[int, int]]]]] = []
+    blocks = []
     if mode == "global":
-        for c in CONSTRUCTIONS:
-            blocks.append((c, {_pid_of(k[1]): v for k, v in ivs[c].items() if k[0] == gpu}))
+        by_c = {
+            c: {pid_of(k[1]): v for k, v in ivs[c].items() if k[0] == gpu} for c in CONSTRUCTIONS
+        }
+        first = next(
+            (e.ts_ns for e in events if e.tag == _RESTORE_START and e.pid is not None
+             and e.ts_ns >= w0),
+            None,
+        )
+        blocks += [(f"{c} zoom", by_c[c], first) for c in CONSTRUCTIONS]
+        blocks += [(c, by_c[c], None) for c in CONSTRUCTIONS]
     else:
-        blocks.append(("kernels", by_pid))
-    return summary, _timeline_text(summary, window, blocks)
+        first = min((s for ivl in by_pid.values() for s, _ in ivl), default=None)
+        blocks += [("kernels zoom", by_pid, first), ("kernels", by_pid, None)]
+    return summary, _timeline_text(summary, window, blocks, masked_restores)
 
 
 def build_summary(sqlite_path: Path, *, gpu: int, mode: str, masked: bool) -> dict:
     return build_report(sqlite_path, gpu=gpu, mode=mode, masked=masked)[0]
 
 
-def _timeline_text(summary: dict, window: tuple[int, int], blocks, width: int = TIMELINE_WIDTH) -> str:
+def _timeline_text(
+    summary: dict, window: tuple[int, int], blocks, masked_restores: int,
+    width: int = TIMELINE_WIDTH,
+) -> str:
+    """``blocks``: ``(name, by_pid, zoom_start)``; a zoom block covers
+    ``ZOOM_CELLS x ZOOM_CELL_NS`` from ``zoom_start`` (None zoom_start = the whole window)."""
     w0, w1 = window
     win = summary["window_s"]
     head = (
@@ -193,26 +222,48 @@ def _timeline_text(summary: dict, window: tuple[int, int], blocks, width: int = 
     if w1 > w0:
         cell_ms = (w1 - w0) / 1e6 / width
         lines.extend(textwrap.wrap(
-            f"1 cell = {cell_ms:.2f} ms; a cell is marked if the interval touches it at all, so "
-            "alternation faster than a cell looks continuous.",
+            f"Overview: 1 cell = {cell_ms:.2f} ms; a cell is marked if the interval touches it at "
+            "all, so alternation faster than a cell looks continuous (see the zoom blocks).",
             width=110,
         ))
-    for name, by_key in blocks:
+    has_rows = any(any(k is not None for k in by) for _, by, _ in blocks)
+    if masked_restores and has_rows:
+        lines.append(f"masked contexts not shown: {masked_restores} restore events")
+    for name, by_key, zoom_start in blocks:
+        base = name.removesuffix(" zoom")
         lines.append("")
-        lines.extend(
-            textwrap.wrap(
-                f"[{name}] {_BLOCK_HELP[name]}; '=' = overlaps the cell",
-                width=110,
-                subsequent_indent="    ",
-            )
-        )
+        zoom = name.endswith(" zoom")
+        if zoom:
+            title = f"[{name}] {_BLOCK_HELP[base]}"
+            if zoom_start is None or w1 <= w0:
+                t0 = t1 = 0
+                title += "; zoom: N/A (no start event in the capture)"
+            else:
+                t0 = zoom_start
+                t1 = t0 + ZOOM_CELLS * ZOOM_CELL_NS
+                title += (f"; zoom: +{t0 / 1e9:.3f} s .. +5 ms, 1 cell = "
+                          f"{ZOOM_CELL_NS // 1000} µs")
+        else:
+            t0, t1 = w0, w1
+            title = f"[{name}] {_BLOCK_HELP[name]}; '=' = overlaps the cell"
+        lines.extend(textwrap.wrap(title, width=110, subsequent_indent="    "))
         keys = sorted(k for k in by_key if k is not None)
         if not keys:
-            lines.append(f"  {NA} (no intervals for this GPU in the capture)")
+            if masked_restores:
+                lines.append(f"  {NA} (intervals exist, but belong to other users' masked processes)")
+            else:
+                lines.append(f"  {NA} (no intervals for this GPU in the capture)")
             continue
-        rows = render_timeline({k: by_key[k] for k in keys}, w0, w1, width)
+        if zoom and t1 <= t0:
+            lines.append(f"  {NA}")
+            continue
+        rows = render_timeline({k: by_key[k] for k in keys}, t0, t1, width)
         for k in keys:
             lines.append(f"{k:>8} |{rows[k]}|")
-        span = f"{(w1 - w0) / 1e9:.1f} s" if w1 > w0 else NA
-        lines.append(" " * 10 + "0.0 s" + span.rjust(width - 5))
+        if zoom:
+            end = "+5 ms"
+            lines.append(" " * 10 + "+0".ljust(width - len(end)) + end)
+        else:
+            span = f"{(w1 - w0) / 1e9:.1f} s" if w1 > w0 else NA
+            lines.append(" " * 10 + "0.0 s" + span.rjust(width - 5))
     return "\n".join(lines) + "\n"

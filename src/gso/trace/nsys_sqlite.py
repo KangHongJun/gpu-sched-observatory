@@ -131,7 +131,7 @@ class KernelLoadStats:
 # --------------------------------------------------------------------- 접근
 
 
-def _pid_of(global_pid: int | None) -> int | None:
+def pid_of(global_pid: int | None) -> int | None:
     if global_pid is None or global_pid == MASKED_GLOBAL_PID:
         return None
     return (global_pid >> 24) & 0xFFFFFF
@@ -199,7 +199,7 @@ def load_ctx_events(path: Path | str, gpu_id: int | None = None) -> list[CtxEven
             gpu_id=-1 if gpu is None else gpu,
             context_id=ctx,
             global_pid=gpid,
-            pid=_pid_of(gpid),
+            pid=pid_of(gpid),
             kind=name if name is not None else f"TAG_{tag}",
             tag=tag,
             ts_ns=ts,
@@ -265,7 +265,7 @@ def load_kernels_with_stats(
         name = dem if dem is not None else man if man is not None else short
         out.append(
             KernelInterval(
-                pid=_pid_of(gpid),
+                pid=pid_of(gpid),
                 device_id=dev,
                 context_id=ctx,
                 stream_id=stream,

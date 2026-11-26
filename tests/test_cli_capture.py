@@ -181,3 +181,61 @@ def test_help_mentions_env_and_no_realtime(capsys):
     out = capsys.readouterr().out
     assert "CUDA_VISIBLE_DEVICES" in out and "on-demand" in out
     assert "real-time" not in out.lower() and "실시간" not in out
+
+
+def test_global_stderr_kernels_na_notes_and_dropped(tmp_path, fake, capsys, monkeypatch):
+    import gso.trace.report as r
+
+    monkeypatch.setattr(r, "dropped_hints", lambda p: ["Some CUPTI events might be missing."])
+    run(["--gpu", "1", "--out", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert "kernels: N/A (global capture records no kernels)" in err
+    assert "kernels: 0" not in err
+    s = json.loads((tmp_path / "summary.json").read_text())
+    for n in s["notes"]:
+        assert f"note: {n}" in err
+    assert "warning: dropped: Some CUPTI events might be missing." in err
+
+
+def test_launched_stderr_rate_na_and_no_context_lines(tmp_path, fake, capsys):
+    fake.fixture, fake.mode = "nsys_launched_min.sqlite", "launched"
+    run(["--gpu", "1", "--out", str(tmp_path), "--", "true"])
+    err = capsys.readouterr().err
+    assert ("context switch rate: N/A (launched capture: only around the launched process)"
+            in err)
+    assert "context pid" not in err and "share restore_save" not in err
+    assert "kernels: 2000" in err
+    s = json.loads((tmp_path / "summary.json").read_text())
+    assert s["ctx"]["per_context"]  # still in the file
+    assert any("note: " + n in err for n in s["notes"])
+
+
+def test_unmapped_kernels_print_lower_bound(tmp_path, fake, capsys, monkeypatch):
+    import gso.trace.report as r
+
+    monkeypatch.setattr(r, "_kernel_gpu_map", lambda p: {})
+    fake.fixture, fake.mode = "nsys_launched_min.sqlite", "launched"
+    run(["--gpu", "1", "--out", str(tmp_path), "--", "true"])
+    err = capsys.readouterr().err
+    assert "kernels: N/A" in err and "could not be mapped" in err
+
+
+def test_out_dir_not_created_before_capture_runs(tmp_path, fake, monkeypatch):
+    out = tmp_path / "late"
+    seen = {}
+    orig = fake.__call__
+
+    def spy(duration_s, out_dir, caps, **kw):
+        seen["existed"] = Path(out_dir).is_dir()
+        return orig(duration_s, out_dir, caps, **kw)
+
+    monkeypatch.setattr(cli_capture, "capture", spy)
+    with pytest.raises(SystemExit):
+        run(["--gpu", "1", "--duration", "4", "--out", str(out)])
+    assert not out.exists()
+    parser = cli.build_parser()
+    args = parser.parse_args(["capture", "--gpu", "1", "--out", str(out)])
+    cli_capture.validate(parser, args, None)
+    assert not out.exists()  # validation alone creates nothing
+    assert run(["--gpu", "1", "--out", str(out)]) == 0
+    assert seen["existed"]

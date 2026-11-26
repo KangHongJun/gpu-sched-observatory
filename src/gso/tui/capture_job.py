@@ -47,12 +47,16 @@ def run_global_capture(
 ) -> CaptureReport:
     """Real runner: a GLOBAL capture (no target), then the report for ``gpu``."""
     res = capture(duration_s, out_dir, caps, run=cancellable_runner(cancel), name="capture")
-    if cancel.is_set():
-        raise CaptureCancelled("capture cancelled")
-    summary, timeline = build_report(res.sqlite_path, gpu=gpu, mode=res.mode, masked=res.masked)
-    for p in (res.sqlite_path, res.rep_path):
-        with contextlib.suppress(OSError):
-            p.unlink()
+    try:
+        if cancel.is_set():
+            raise CaptureCancelled("capture cancelled")
+        summary, timeline = build_report(
+            res.sqlite_path, gpu=gpu, mode=res.mode, masked=res.masked
+        )
+    finally:  # the app keeps only the summary and text, never the capture files
+        for p in (res.sqlite_path, res.rep_path):
+            with contextlib.suppress(OSError):
+                p.unlink()
     return CaptureReport(summary, timeline, res.started_ns, res.duration_s)
 
 

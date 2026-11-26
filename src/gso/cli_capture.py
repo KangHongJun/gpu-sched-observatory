@@ -19,7 +19,7 @@ from gso.trace.nsys_capture import (
     CaptureUnavailable,
     capture,
 )
-from gso.trace.report import build_report
+from gso.trace.report import UNMAPPED_MARK, build_report
 from gso.tui.widgets import NA
 
 EXIT_USAGE = 2
@@ -77,7 +77,8 @@ def add_parser(sub) -> None:
 
 
 def validate(parser: argparse.ArgumentParser, args, target: list[str] | None) -> None:
-    """All checks happen before nsys runs; the output directory is created last."""
+    """All checks happen before nsys runs; the output directory is created only right before
+    ``capture()`` (see ``run_capture``)."""
     if target is not None and not target:
         parser.error("nothing follows '--': give the command to launch")
     if args.end_target and target is None:
@@ -94,10 +95,6 @@ def validate(parser: argparse.ArgumentParser, args, target: list[str] | None) ->
         parser.error(f"cannot create --out below a non-directory: {probe}")
     if not os.access(probe, os.W_OK | os.X_OK):
         parser.error(f"directory is not writable: {probe}")
-    try:
-        out.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        parser.error(f"cannot create --out: {e}")
     args.target = target
 
 
@@ -130,34 +127,52 @@ def _ms(x) -> str:
 
 
 def format_summary_lines(s: dict) -> list[str]:
-    """One line per key number; ``N/A`` for unknown; ``≥`` when the rate is a lower bound."""
+    """Key numbers with their caveats: ``N/A`` for unknown, ``≥`` for lower bounds, then every
+    summary note and dropped-event hint."""
     ctx = s["ctx"]
+    launched = s["mode"] == "launched"
     rate = ctx["switch_rate_per_s"]
-    if rate is None:
-        rate_txt = NA
+    if launched:
+        rate_line = "context switch rate: N/A (launched capture: only around the launched process)"
+    elif rate is None:
+        rate_line = f"context switch rate: {NA}"
+    elif ctx["switch_rate_is_lower_bound"]:
+        rate_line = f"context switch rate: ≥ {rate:.1f} /s (lower bound: masked rows present)"
     else:
-        rate_txt = f"{'≥ ' if ctx['switch_rate_is_lower_bound'] else ''}{rate:.1f} /s"
+        rate_line = f"context switch rate: {rate:.1f} /s"
     win = s["window_s"]
     lines = [
         (f"GPU {s['gpu']}, mode {s['mode']}, window {NA if win is None else f'{win:.2f} s'}, "
          f"masked: {'yes' if s['masked'] else 'no'} (on-demand capture)"),
-        f"context switch rate: {rate_txt}"
-        + (" (lower bound: masked rows present)" if ctx["switch_rate_is_lower_bound"] else ""),
+        rate_line,
     ]
-    for pc in ctx["per_context"]:
-        r = pc["restores_per_s"]
-        lines.append(
-            f"context pid {pc['pid']}: restores {NA if r is None else f'{r:.1f}'} /s | "
-            f"share restore_save {_pct(pc['restore_save']['share'])} (estimate), "
-            f"hold {_pct(pc['hold']['share'])} (estimate)"
-        )
+    if not launched:  # in launched mode the shares are not meaningful here; they stay in the file
+        for pc in ctx["per_context"]:
+            r = pc["restores_per_s"]
+            lines.append(
+                f"context pid {pc['pid']}: restores {NA if r is None else f'{r:.1f}'} /s | "
+                f"share restore_save {_pct(pc['restore_save']['share'])} (estimate), "
+                f"hold {_pct(pc['hold']['share'])} (estimate)"
+            )
     k = s["kernel"]
-    count = NA if k["count"] is None else k["count"]
-    lines.append(f"kernels: {count}, duration p50 {_ms(k['duration_ms']['p50_ms'])}")
+    unmapped = any(UNMAPPED_MARK in n for n in s["notes"])
+    if s["mode"] == "global":
+        lines.append("kernels: N/A (global capture records no kernels)")
+    elif k["count"] is None:
+        why = " (kernels could not be mapped to this GPU, see notes)" if unmapped else ""
+        lines.append(f"kernels: {NA}{why}")
+    else:
+        lower = "≥ " if unmapped else ""
+        why = " (some kernels could not be mapped to this GPU, see notes)" if unmapped else ""
+        lines.append(
+            f"kernels: {lower}{k['count']}, duration p50 {_ms(k['duration_ms']['p50_ms'])}{why}"
+        )
     lines.append(
         f"launch-to-start p50 (CUDA API call start -> kernel start, estimate): "
         f"{_ms(k['launch_to_start_ms']['p50_ms'])}"
     )
+    lines += [f"note: {n}" for n in s["notes"]]
+    lines += [f"warning: dropped: {h}" for h in s["dropped_hints"]]
     return lines
 
 
@@ -166,6 +181,11 @@ def run_capture(args) -> int:
     target = args.target
     try:
         caps = detect()
+        try:
+            Path(args.out).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"gso: cannot create {args.out}: {e}", file=err)
+            return EXIT_IO_ERROR
         res = capture(
             args.duration,
             Path(args.out),

@@ -27,8 +27,9 @@ def report():
 
 
 class FakeRunner:
-    def __init__(self, rep=None, raises=None, block=False):
+    def __init__(self, rep=None, raises=None, block=False, ignore_cancel=False):
         self.rep, self.raises, self.block = rep or report(), raises, block
+        self.ignore_cancel = ignore_cancel
         self.calls = []
         self.started = threading.Event()
         self.release = threading.Event()
@@ -39,9 +40,9 @@ class FakeRunner:
         self.thread_names.append(threading.current_thread().name)
         self.started.set()
         if self.block:
-            while not (self.release.is_set() or cancel.is_set()):
+            while not (self.release.is_set() or (cancel.is_set() and not self.ignore_cancel)):
                 time.sleep(0.01)
-            if cancel.is_set():
+            if cancel.is_set() and not self.ignore_cancel:
                 raise CaptureCancelled("capture cancelled")
         if self.raises:
             raise self.raises
@@ -224,12 +225,54 @@ async def test_exit_during_running_capture_is_bounded():
 
 
 async def test_quit_action_waits_for_the_capture_to_end():
-    r = FakeRunner(block=True)
+    r = FakeRunner(block=True, ignore_cancel=True)
     app = make(r)
     async with app.run_test(size=(120, 35)) as pilot:
         await settle(pilot)
         await start_capture(app, pilot)
         assert await until(pilot, r.started.is_set)
-        r.release.set()  # the capture ends on its own; quit waits for it
-        await app.action_quit()
-    assert app._done.is_set()
+        t0 = time.monotonic()
+        threading.Timer(0.6, r.release.set).start()
+        quit_task = asyncio.create_task(app.action_quit())
+        assert await until(pilot, lambda: "waiting for capture to finish…" in text(app, "status"))
+        assert not quit_task.done()  # still blocked on the capture
+        await quit_task
+        assert time.monotonic() - t0 >= 0.5  # returned only after the release
+        assert r.release.is_set() and app._done.is_set()
+
+
+async def test_temp_dir_removed_on_exit():
+    r = FakeRunner()
+    app = make(r)
+    async with app.run_test(size=(120, 35)) as pilot:
+        await settle(pilot)
+        await start_capture(app, pilot)
+        assert await until(pilot, lambda: app._capture_report is not None)
+        assert app._tmpdir is not None and app._tmpdir.is_dir()
+        tmp = app._tmpdir
+    assert not tmp.exists()
+
+
+def test_late_cancel_removes_capture_files(tmp_path, monkeypatch):
+    import shutil
+    from pathlib import Path
+
+    import pytest
+
+    from gso.trace.nsys_capture import CaptureResult
+    from gso.tui import capture_job
+
+    def fake_capture(duration_s, out_dir, caps_, run=None, name="capture", **kw):
+        sq, rep = Path(out_dir) / "capture.sqlite", Path(out_dir) / "capture.nsys-rep"
+        shutil.copy(Path(__file__).parent / "fixtures" / "nsys_ctxsw_min.sqlite", sq)
+        rep.write_bytes(b"x")
+        return CaptureResult(sq, rep, "global", True, duration_s, 0, 1.0, ())
+
+    monkeypatch.setattr(capture_job, "capture", fake_capture)
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(CaptureCancelled):
+        capture_job.run_global_capture(5, tmp_path, caps(), 1, cancel)
+    assert list(tmp_path.iterdir()) == []
+    ok = capture_job.run_global_capture(5, tmp_path, caps(), 1, threading.Event())
+    assert ok.summary["gpu"] == 1 and list(tmp_path.iterdir()) == []

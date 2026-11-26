@@ -47,9 +47,10 @@ def test_global_fixture_gpu1():
         assert 0 <= rs["share"] <= 1 and 0 <= hold["share"] <= 1
         assert rs["share"] < hold["share"]
         assert set(rs["slice_ms"]) == PCT
-    assert s["kernel"]["count"] == 0
-    assert s["kernel"]["duration_ms"]["p50_ms"] is None
-    assert s["kernel"]["launch_to_start_ms"]["p50_ms"] is None
+    k = s["kernel"]  # a global capture measures no kernels: unknown, not zero
+    assert k["count"] is None and k["ambiguous_api_matches"] is None and k["pids"] is None
+    assert k["duration_ms"]["n"] is None and k["duration_ms"]["p50_ms"] is None
+    assert k["launch_to_start_ms"]["p50_ms"] is None
     assert s["interprocess_overlap"] is None
     joined = " ".join(s["notes"])
     assert "restore_save" in joined and "hold" in joined
@@ -145,3 +146,65 @@ def test_timeline_note_when_nothing_to_draw(tmp_path):
     sqlite3.connect(p).close()
     _, tl = build_report(p, gpu=1, mode="global", masked=True)
     assert "N/A" in tl
+
+
+def test_launched_without_kernel_table_is_null(tmp_path):
+    p = tmp_path / "e.sqlite"
+    sqlite3.connect(p).close()
+    k = build_summary(p, gpu=1, mode="launched", masked=True)["kernel"]
+    assert k["count"] is None and k["pids"] is None and k["ambiguous_api_matches"] is None
+
+
+def _zoom_rows(tl, name):
+    lines = tl.splitlines()
+    i = next(n for n, ln in enumerate(lines) if ln.startswith(f"[{name} zoom]"))
+    rows = []
+    for ln in lines[i + 1 :]:
+        if ln.startswith("[") or not ln.strip():
+            break
+        if "|" in ln:
+            rows.append(ln.split("|")[1])
+    return rows
+
+
+def test_zoomed_blocks_alternate_on_global_fixture():
+    _, tl = build_report(GLOBAL, gpu=1, mode="global", masked=True)
+    assert "zoom: +" in tl and "1 cell = 50 µs" in tl
+    assert tl.index("[restore_save zoom]") < tl.index("[restore_save]")  # zoom first
+    rows = _zoom_rows(tl, "restore_save")
+    assert len(rows) == 2 and all(len(r) == 100 for r in rows)
+    for r in rows:
+        assert "=" in r and " " in r
+    assert rows[0] != rows[1]
+    assert _zoom_rows(tl, "hold")
+
+
+def test_zoomed_kernel_block_in_launched_mode():
+    _, tl = build_report(LAUNCHED, gpu=1, mode="launched", masked=True)
+    (row,) = _zoom_rows(tl, "kernels")
+    assert "=" in row
+
+
+def test_masked_only_gpu_timeline_says_masked():
+    _, tl = build_report(GLOBAL, gpu=0, mode="global", masked=True)
+    assert "masked" in tl and "no intervals" not in tl
+
+
+def test_mixed_masked_header_line(monkeypatch):
+    import gso.trace.report as r
+
+    real = r.load_ctx_events
+
+    def with_masked(path, gpu_id=None):
+        ev = real(path, gpu_id=gpu_id)
+        from dataclasses import replace
+
+        first = next(e for e in ev if e.tag == 8)
+        masked = [replace(first, pid=None, global_pid=1 << 48, ts_ns=first.ts_ns + 1)]
+        return ev + masked
+
+    monkeypatch.setattr(r, "load_ctx_events", with_masked)
+    s, tl = build_report(GLOBAL, gpu=1, mode="global", masked=True)
+    n = s["ctx"]["masked_restore_events"]
+    assert n >= 1
+    assert f"masked contexts not shown: {n} restore events" in tl
