@@ -25,11 +25,14 @@ from pathlib import Path
 
 from gso.analysis.stats import percentile
 from gso.bench.workloads._common import (
+    BarrierMissed,
     Measured,
     StopFlag,
     ThroughputOnly,
     WorkloadUnavailable,
     file_lock,
+    current,
+    record_window,
     run_cli,
 )
 
@@ -70,6 +73,29 @@ def window_start(points: list[tuple[float, int, int | None]], warmup_s: float) -
     t0 = points[0][0]
     for i, p in enumerate(points):
         if p[0] >= t0 + warmup_s:
+            return i
+    return None
+
+
+BARRIER_TOL_S = 1.0  # 진행 샘플 간격(0.5 s)의 두 배
+
+
+def gate_start(
+    walls: list[float], warm_i: int | None, start_at: float | None, tol_s: float = BARRIER_TOL_S
+) -> int | None:
+    """--start-at 장벽을 반영한 측정 창 시작 인덱스. 아직 정할 수 없으면 None.
+
+    워밍업이 끝난 첫 샘플이 start_at + tol_s보다 늦으면 장벽을 놓친 것(BarrierMissed).
+    그렇지 않으면 start_at 이후 도착한 첫 샘플부터 잰다(walls = 샘플별 벽시계 epoch s).
+    """
+    if start_at is None:
+        return warm_i
+    if warm_i is None:
+        return None
+    if walls[warm_i] > start_at + tol_s:
+        raise BarrierMissed(f"start barrier missed by {walls[warm_i] - start_at:.3f} s")
+    for i in range(warm_i, len(walls)):
+        if walls[i] >= start_at:
             return i
     return None
 
@@ -181,6 +207,8 @@ def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
         deadline = WARMUP_S + args.duration + 15.0  # 진행 샘플이 오지 않을 때의 상한
         pending: list[str] = []
         points: list[tuple[float, int, int | None]] = []
+        walls: list[float] = []  # points[i]가 도착한 벽시계 시각(epoch s)
+        ctx = current()
         i0: int | None = None
         while True:
             if stop.is_set():
@@ -203,9 +231,10 @@ def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
                 pt = block_point(t, block)
                 if pt is not None:
                     points.append(pt)
+                    walls.append(ctx.clock())
             pending = []
             if i0 is None:
-                i0 = window_start(points, WARMUP_S)
+                i0 = gate_start(walls, window_start(points, WARMUP_S), ctx.start_at)
             if i0 is not None and points[-1][0] - points[i0][0] >= args.duration:
                 break
     finally:
@@ -213,6 +242,7 @@ def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
     metrics = window_metrics(points, i0)
     if metrics is None:
         raise WorkloadUnavailable("ffmpeg reported no decoded frames")
+    record_window(walls[i0], walls[-1])
     extra = {k: metrics[k] for k in ("fps", "fps_min", "fps_p5", "frames_dropped")}
     return ThroughputOnly(metrics["frames"], metrics["window_s"], extra)
 
