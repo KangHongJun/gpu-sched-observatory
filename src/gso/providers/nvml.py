@@ -77,7 +77,9 @@ class NvmlProvider:
         recs.extend(self._process_records(now_ns))
         return recs
 
-    def _rec(self, now_ns, metric, value, unit, scope, pid=None, quality=Quality.MEASURED):
+    def _rec(
+        self, now_ns, metric, value, unit, scope, pid=None, quality=Quality.MEASURED
+    ):
         return Record(
             now_ns, self._uuid, metric, value, unit, SOURCE, scope, quality, pid=pid
         )
@@ -136,7 +138,9 @@ class NvmlProvider:
         """({pid: sm_util}, 상태). 상태: 'ok' | 'none'(샘플 없음) | 'unsupported'."""
         n = self._nvml
         try:
-            samples = n.nvmlDeviceGetProcessUtilization(self._handle, self._last_seen_ts)
+            samples = n.nvmlDeviceGetProcessUtilization(
+                self._handle, self._last_seen_ts
+            )
         except n.NVMLError_NotFound:
             return {}, "none"
         except n.NVMLError_NotSupported:
@@ -170,14 +174,20 @@ class NvmlProvider:
             if mem is None:
                 recs.append(self._unsup(now_ns, "proc.mem_used", "MiB", P, pid))
             else:
-                recs.append(self._rec(now_ns, "proc.mem_used", mem / _MIB, "MiB", P, pid))
+                recs.append(
+                    self._rec(now_ns, "proc.mem_used", mem / _MIB, "MiB", P, pid)
+                )
             recs.append(
-                self._rec(now_ns, "proc.is_mps", 1.0 if pid in mps_pids else 0.0, "", P, pid)
+                self._rec(
+                    now_ns, "proc.is_mps", 1.0 if pid in mps_pids else 0.0, "", P, pid
+                )
             )
             if state == "unsupported":
                 recs.append(self._unsup(now_ns, "proc.sm_util", "%", P, pid))
             elif pid in sm:
-                recs.append(self._rec(now_ns, "proc.sm_util", float(sm[pid]), "%", P, pid))
+                recs.append(
+                    self._rec(now_ns, "proc.sm_util", float(sm[pid]), "%", P, pid)
+                )
             else:
                 recs.append(self._dropped(now_ns, "proc.sm_util", "%", P, pid))
             out.extend(recs)

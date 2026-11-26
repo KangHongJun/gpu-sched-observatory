@@ -20,8 +20,11 @@ def test_ensure_video_builds_once_with_per_pid_tmp(tmp_path, monkeypatch):
     assert p1 == p2 and p1.exists()
     assert len(calls) == 1
     import os
+
     assert str(os.getpid()) in calls[0]
-    assert sorted(x.name for x in tmp_path.iterdir() if x.suffix != ".lock") == [p1.name]
+    assert sorted(x.name for x in tmp_path.iterdir() if x.suffix != ".lock") == [
+        p1.name
+    ]
 
 
 def test_ensure_video_stopped_raises_interrupted(tmp_path, monkeypatch):

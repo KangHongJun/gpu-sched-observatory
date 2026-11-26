@@ -94,7 +94,10 @@ def test_process_rows_ties_by_pid_and_stale_omitted():
 
 
 def test_process_rows_stale_field_is_none_not_old_value():
-    recs = [prec("proc.sm_util", 50.0, 4, ts=NOW - AGE - 1), prec("proc.mem_used", 9.0, 4)]
+    recs = [
+        prec("proc.sm_util", 50.0, 4, ts=NOW - AGE - 1),
+        prec("proc.mem_used", 9.0, 4),
+    ]
     (row,) = process_rows(recs, {}, NOW, AGE)
     assert row.sm_util is None and row.vram_mib == 9.0
 
@@ -120,8 +123,6 @@ def test_formatters():
     assert fmt_temp(None) == "N/A"
     assert fmt_power(178.4) == "178 W"
     assert fmt_power(None) == "N/A"
-
-
 
 
 @pytest.mark.parametrize("v", [float("nan"), float("inf"), float("-inf")])

@@ -141,7 +141,10 @@ def test_run_timeout_is_unavailable():
     "out, needle",
     [
         ("Error: unable to find GPU id 9", "GPU id 9"),
-        ("Error response from daemon: No such container: gso-dcgm", "No such container"),
+        (
+            "Error response from daemon: No such container: gso-dcgm",
+            "No such container",
+        ),
     ],
 )
 def test_nonzero_exit_not_host_engine(out, needle):
@@ -243,10 +246,15 @@ def test_nsys_resolution_order(tmp_path):
     which = lambda n: "/usr/bin/nsys" if n == "nsys" else None
     globbed = lambda _: ["/o/1/bin/nsys", "/o/2/bin/nsys"]
     # env var wins
-    assert det(environ={"NSYS": str(exe)}, which=which, glob=globbed).nsys_path == str(exe)
+    assert det(environ={"NSYS": str(exe)}, which=which, glob=globbed).nsys_path == str(
+        exe
+    )
     # env var not executable -> PATH
     bad = tmp_path / "nope"
-    assert det(environ={"NSYS": str(bad)}, which=which, glob=globbed).nsys_path == "/usr/bin/nsys"
+    assert (
+        det(environ={"NSYS": str(bad)}, which=which, glob=globbed).nsys_path
+        == "/usr/bin/nsys"
+    )
     # glob (newest = last in sorted order)
     assert det(which=lambda _: None, glob=globbed).nsys_path == "/o/2/bin/nsys"
     # none

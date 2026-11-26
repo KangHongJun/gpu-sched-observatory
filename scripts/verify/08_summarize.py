@@ -33,7 +33,9 @@ def main():
     data = {c: load(c, prefix) for c in CONDS}
     base_sum = None
     base_sd = None
-    print("조건 | n | A iter/s | B iter/s | 합계 iter/s | 합계 변화 | p99 ms (A,B 평균 per rep)")
+    print(
+        "조건 | n | A iter/s | B iter/s | 합계 iter/s | 합계 변화 | p99 ms (A,B 평균 per rep)"
+    )
     for c in CONDS:
         reps = data[c]
         if not reps:
@@ -46,7 +48,11 @@ def main():
         sm, ss = ms(ts)
         if c == "none":
             base_sum, base_sd = sm, ss
-        chg = "-" if c == "none" or base_sum is None else f"{(sm / base_sum - 1) * 100:+.2f}%"
+        chg = (
+            "-"
+            if c == "none" or base_sum is None
+            else f"{(sm / base_sum - 1) * 100:+.2f}%"
+        )
         am, asd = ms(ta)
         bm, bsd = ms(tb)
         pm, psd = ms(p99)

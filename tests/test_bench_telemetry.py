@@ -10,9 +10,16 @@ def _rec(ts, metric, v, quality=Quality.MEASURED):
 
 
 def test_mean_in_window_uses_only_measured_samples_inside_the_window():
-    recs = [_rec(5, "m", 100.0), _rec(10, "m", 2.0), _rec(15, "m", 4.0), _rec(20, "m", 6.0),
-            _rec(25, "m", 999.0), _rec(12, "other", 77.0),
-            _rec(13, "m", None, Quality.DROPPED), unsupported(14, "u", "m", "W", "t", Scope.DEVICE)]
+    recs = [
+        _rec(5, "m", 100.0),
+        _rec(10, "m", 2.0),
+        _rec(15, "m", 4.0),
+        _rec(20, "m", 6.0),
+        _rec(25, "m", 999.0),
+        _rec(12, "other", 77.0),
+        _rec(13, "m", None, Quality.DROPPED),
+        unsupported(14, "u", "m", "W", "t", Scope.DEVICE),
+    ]
     assert mean_in_window(recs, "m", 10, 20) == 4.0
 
 
@@ -22,7 +29,9 @@ def test_mean_in_window_without_samples_is_none_not_zero():
 
 
 def test_samples_power_every_interval_and_probes_temperature_and_util():
-    t = NvmlDcgmTelemetry(0, nvml=FakeNvml(power_mw=150000, temp=61, util=(42, 7)), interval_s=0.01)
+    t = NvmlDcgmTelemetry(
+        0, nvml=FakeNvml(power_mw=150000, temp=61, util=(42, 7)), interval_s=0.01
+    )
     t.start()
     try:
         assert t.probe() == (61.0, 42.0)
@@ -32,7 +41,12 @@ def test_samples_power_every_interval_and_probes_temperature_and_util():
     means = t.window_means(0, 2**62)
     assert means["power_w_mean"] == 150.0
     # DCGM not configured: unknown, never 0
-    for k in ("sm_active_mean", "sm_occupancy_mean", "tensor_active_mean", "dram_active_mean"):
+    for k in (
+        "sm_active_mean",
+        "sm_occupancy_mean",
+        "tensor_active_mean",
+        "dram_active_mean",
+    ):
         assert means[k] is None
 
 
@@ -45,7 +59,9 @@ def test_window_outside_samples_gives_none():
 
 
 def test_nvml_failure_degrades_to_none():
-    t = NvmlDcgmTelemetry(0, nvml=FakeNvml(errors={"nvmlInit": RuntimeError("no driver")}))
+    t = NvmlDcgmTelemetry(
+        0, nvml=FakeNvml(errors={"nvmlInit": RuntimeError("no driver")})
+    )
     t.start()
     assert t.probe() == (None, None)
     assert t.window_means(0, 2**62)["power_w_mean"] is None
@@ -55,16 +71,24 @@ def test_nvml_failure_degrades_to_none():
 
 def test_dcgm_not_started_when_no_field_is_supported():
     popens = []
-    t = NvmlDcgmTelemetry(0, dcgm_fields={1002: False}, nvml=FakeNvml(), interval_s=0.01,
-                          popen=lambda *a, **k: popens.append(a))
+    t = NvmlDcgmTelemetry(
+        0,
+        dcgm_fields={1002: False},
+        nvml=FakeNvml(),
+        interval_s=0.01,
+        popen=lambda *a, **k: popens.append(a),
+    )
     t.start()
     t.stop()
     assert popens == []
 
 
 def test_sm_clock_mean_and_static_info():
-    t = NvmlDcgmTelemetry(0, nvml=FakeNvml(sm_clock=1700, power_limit_mw=230000, pstate=2),
-                          interval_s=0.01)
+    t = NvmlDcgmTelemetry(
+        0,
+        nvml=FakeNvml(sm_clock=1700, power_limit_mw=230000, pstate=2),
+        interval_s=0.01,
+    )
     t.start()
     try:
         time.sleep(0.12)
@@ -75,9 +99,13 @@ def test_sm_clock_mean_and_static_info():
 
 
 def test_static_info_none_when_unsupported():
-    nv = FakeNvml(errors={"nvmlDeviceGetEnforcedPowerLimit": FakeNvml.NVMLError_NotSupported,
-                          "nvmlDeviceGetPerformanceState": FakeNvml.NVMLError_NotSupported,
-                          "nvmlDeviceGetClockInfo": FakeNvml.NVMLError_NotSupported})
+    nv = FakeNvml(
+        errors={
+            "nvmlDeviceGetEnforcedPowerLimit": FakeNvml.NVMLError_NotSupported,
+            "nvmlDeviceGetPerformanceState": FakeNvml.NVMLError_NotSupported,
+            "nvmlDeviceGetClockInfo": FakeNvml.NVMLError_NotSupported,
+        }
+    )
     t = NvmlDcgmTelemetry(0, nvml=nv, interval_s=0.01)
     t.start()
     time.sleep(0.05)

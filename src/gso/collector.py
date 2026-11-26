@@ -104,7 +104,9 @@ class Collector:
     def status(self) -> CollectorStatus:
         """A copy; safe to read from another thread."""
         with self._lock:
-            st = CollectorStatus(**{**self._st.__dict__, "process_names": dict(self._st.process_names)})
+            st = CollectorStatus(
+                **{**self._st.__dict__, "process_names": dict(self._st.process_names)}
+            )
         st.dcgm_error = self._dcgm_error()
         return st
 
@@ -140,7 +142,9 @@ class Collector:
             except Exception as e:  # noqa: BLE001
                 self._dcgm_build_error = _err(e)
                 self._dcgm = None
-        self._thread = threading.Thread(target=self._run, name="gso-collector", daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, name="gso-collector", daemon=True
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -204,7 +208,9 @@ class Collector:
 
     def _read_name(self, pid: int) -> str:
         try:
-            with open(f"{self._proc_root}/{pid}/comm", encoding="utf-8", errors="replace") as f:
+            with open(
+                f"{self._proc_root}/{pid}/comm", encoding="utf-8", errors="replace"
+            ) as f:
                 name = f.read().strip()
         except OSError:
             return "?"

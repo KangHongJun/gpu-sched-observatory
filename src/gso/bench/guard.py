@@ -34,7 +34,9 @@ class GuardedSession:
                 except RuntimeError as e:
                     self.on_warning(f"MPS session did not stop cleanly: {e}")
                     if exc_type is None:
-                        raise UnsafeGpuError(f"MPS session did not stop cleanly: {e}") from e
+                        raise UnsafeGpuError(
+                            f"MPS session did not stop cleanly: {e}"
+                        ) from e
             for w in caught:
                 self.on_warning(f"MPS session exit: {w.message}")
         finally:

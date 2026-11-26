@@ -33,7 +33,9 @@ EXPORT_TIMEOUT_S = 120
 _TAIL_LINES = 5
 _CANCEL_POLL_S = 0.2
 _SIGTERM_EXIT = 143  # 128 + SIGTERM
-_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+_NAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+)
 
 
 class CaptureUnavailable(Exception):
@@ -104,7 +106,15 @@ def build_command(
 
 
 def build_export_command(nsys: str, rep: Path, sqlite: Path) -> list[str]:
-    return [nsys, "export", "--type=sqlite", "--force-overwrite=true", "-o", str(sqlite), str(rep)]
+    return [
+        nsys,
+        "export",
+        "--type=sqlite",
+        "--force-overwrite=true",
+        "-o",
+        str(sqlite),
+        str(rep),
+    ]
 
 
 # 기본 runner. nsys는 보조 프로세스를 띄우므로 subprocess.run(timeout=)만으로는 시간 초과 때
@@ -122,14 +132,23 @@ def _wait_cancellable(proc, timeout, cancel, argv) -> None:
         if left is not None and left <= 0:
             raise subprocess.TimeoutExpired(argv, timeout)
         try:
-            proc.wait(timeout=_CANCEL_POLL_S if left is None else min(_CANCEL_POLL_S, left))
+            proc.wait(
+                timeout=_CANCEL_POLL_S if left is None else min(_CANCEL_POLL_S, left)
+            )
             return
         except subprocess.TimeoutExpired:
             continue
 
 
 def _run_in_group(
-    argv, *, capture_output=True, text=True, timeout=None, env=None, errors="replace", cancel=None
+    argv,
+    *,
+    capture_output=True,
+    text=True,
+    timeout=None,
+    env=None,
+    errors="replace",
+    cancel=None,
 ):
     with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
         proc = subprocess.Popen(
@@ -176,7 +195,9 @@ def cancellable_runner(cancel):
 
 
 def _tail(*streams) -> str:
-    lines = [ln.strip() for s in streams if s for ln in str(s).splitlines() if ln.strip()]
+    lines = [
+        ln.strip() for s in streams if s for ln in str(s).splitlines() if ln.strip()
+    ]
     return "\n".join(lines[-_TAIL_LINES:])
 
 
@@ -193,12 +214,21 @@ def _validate_name(name: str) -> None:
         or name.startswith(".")
         or not set(name) <= _NAME_CHARS
     ):
-        raise ValueError(f"name must be a plain file stem (letters, digits, - _ .), got {name!r}")
+        raise ValueError(
+            f"name must be a plain file stem (letters, digits, - _ .), got {name!r}"
+        )
 
 
 def _exec(run, argv, timeout, env, what: str, ok_codes=(0,)):
     try:
-        res = run(argv, capture_output=True, text=True, timeout=timeout, env=env, errors="replace")
+        res = run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            errors="replace",
+        )
     except subprocess.TimeoutExpired as e:
         raise CaptureError(f"nsys {what} 시간 초과 (timeout {timeout}s)") from e
     except OSError as e:
@@ -287,7 +317,9 @@ def capture(
     terminated = False
     try:
         ok = (0, _SIGTERM_EXIT) if end_target else (0,)
-        prof = _exec(run, profile_argv, duration_s + PROFILE_TIMEOUT_MARGIN_S, env, "profile", ok)
+        prof = _exec(
+            run, profile_argv, duration_s + PROFILE_TIMEOUT_MARGIN_S, env, "profile", ok
+        )
         profile_s = monotonic() - t0
         if not _fresh_nonempty(rep, before_rep):
             raise CaptureError(
@@ -304,7 +336,9 @@ def capture(
             terminated = True
         _exec(run, export_argv, EXPORT_TIMEOUT_S, None, "export")
         if not _fresh_nonempty(sqlite, before_sqlite):
-            raise CaptureError(f"nsys export exited 0 but produced no new non-empty {sqlite.name}")
+            raise CaptureError(
+                f"nsys export exited 0 but produced no new non-empty {sqlite.name}"
+            )
     except BaseException:
         for path, before in ((rep, before_rep), (sqlite, before_sqlite)):
             if _signature(path) != before:
@@ -315,12 +349,16 @@ def capture(
     masked = not caps.is_root
     warnings: list[str] = []
     if masked:
-        warnings.append("root가 아니어서 다른 사용자 프로세스는 마스킹된 PID로 나타납니다.")
+        warnings.append(
+            "root가 아니어서 다른 사용자 프로세스는 마스킹된 PID로 나타납니다."
+        )
     if target is None:
         warnings.append("외부 프로세스의 CUDA 커널 구간은 이 캡처에 기록되지 않습니다.")
         mode = "global"
     else:
-        warnings.append("컨텍스트 전환 이벤트는 직접 실행한 프로세스 주변에서만 기록됩니다.")
+        warnings.append(
+            "컨텍스트 전환 이벤트는 직접 실행한 프로세스 주변에서만 기록됩니다."
+        )
         warnings.append(
             "대상이 기간보다 먼저 종료되면 캡처도 그때 끝나므로 실제 캡처 길이는"
             " duration_s보다 짧을 수 있습니다."

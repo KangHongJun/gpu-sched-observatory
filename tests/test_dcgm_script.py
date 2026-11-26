@@ -12,8 +12,9 @@ def _run(tmp_path, cmd, gpu=None):
     env = {"PATH": f"{tmp_path}:{os.environ['PATH']}"}
     if gpu is not None:
         env["GSO_DCGM_GPU"] = gpu
-    return subprocess.run(["bash", str(SCRIPT), cmd], env=env, capture_output=True,
-                          text=True, check=False)
+    return subprocess.run(
+        ["bash", str(SCRIPT), cmd], env=env, capture_output=True, text=True, check=False
+    )
 
 
 def test_stop_and_status_do_not_need_gpu_choice(tmp_path):

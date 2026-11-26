@@ -51,11 +51,31 @@ class FakeNvmlProvider:
         self.ticks.release()
         if self.fail_always or self.calls <= self.fail_first:
             raise RuntimeError("nvml boom")
-        recs = [Record(now_ns, UUID, "gpu.util", 50.0, "%", "nvml", Scope.DEVICE, Quality.MEASURED)]
+        recs = [
+            Record(
+                now_ns,
+                UUID,
+                "gpu.util",
+                50.0,
+                "%",
+                "nvml",
+                Scope.DEVICE,
+                Quality.MEASURED,
+            )
+        ]
         for pid in self.pids:
             recs.append(
-                Record(now_ns, UUID, "proc.mem_used", 10.0, "MiB", "nvml", Scope.PROCESS,
-                       Quality.MEASURED, pid=pid)
+                Record(
+                    now_ns,
+                    UUID,
+                    "proc.mem_used",
+                    10.0,
+                    "MiB",
+                    "nvml",
+                    Scope.PROCESS,
+                    Quality.MEASURED,
+                    pid=pid,
+                )
             )
         return recs
 
@@ -125,7 +145,9 @@ def test_sample_that_raises_does_not_stop_loop():
     try:
         assert wait_for(lambda: len(buf.snapshot("gpu.util")) >= 2)
         assert nvml.calls >= 3
-        assert c.status.nvml_error is None  # recovered: error describes the current state
+        assert (
+            c.status.nvml_error is None
+        )  # recovered: error describes the current state
     finally:
         c.stop()
 
@@ -148,7 +170,9 @@ def test_open_failure_sets_nvml_error():
     _, c = build(nvml=nvml)
     c.start()
     try:
-        assert wait_for(lambda: c.status.nvml_error and "no driver" in c.status.nvml_error)
+        assert wait_for(
+            lambda: c.status.nvml_error and "no driver" in c.status.nvml_error
+        )
     finally:
         c.stop()
 
@@ -205,8 +229,14 @@ def test_dcgm_provider_error_gives_unsupported_and_error():
 def test_gpu_index_not_in_caps_no_loop_no_exception():
     nvml = FakeNvmlProvider()
     buf = RingBuffer(100)
-    c = Collector(buf, make_caps(), 7, interval_s=0.01, nvml_provider=nvml,
-                  mps_query=lambda: MpsStatus(False, [], [], None))
+    c = Collector(
+        buf,
+        make_caps(),
+        7,
+        interval_s=0.01,
+        nvml_provider=nvml,
+        mps_query=lambda: MpsStatus(False, [], [], None),
+    )
     c.start()
     time.sleep(0.05)
     assert nvml.calls == 0 and len(buf) == 0
@@ -219,8 +249,15 @@ def test_stop_is_prompt_idempotent_and_cleans_up():
     nvml = FakeNvmlProvider()
     dcgm = FakeDcgm()
     buf = RingBuffer(1000)
-    c = Collector(buf, make_caps(True), 1, interval_s=30.0, nvml_provider=nvml,
-                  dcgm_provider=dcgm, mps_query=lambda: MpsStatus(False, [], [], None))
+    c = Collector(
+        buf,
+        make_caps(True),
+        1,
+        interval_s=30.0,
+        nvml_provider=nvml,
+        dcgm_provider=dcgm,
+        mps_query=lambda: MpsStatus(False, [], [], None),
+    )
     c.start()
     ticks(nvml, 1)  # loop is now waiting 30 s
     t0 = time.monotonic()

@@ -176,7 +176,9 @@ class FakeNvml:
     def nvmlDeviceGetMemoryInfo(self, handle):
         self._enter("nvmlDeviceGetMemoryInfo", handle)
         used = self._per_gpu(self.mem_used, handle)
-        return SimpleNamespace(total=self.mem_total, used=used, free=self.mem_total - used)
+        return SimpleNamespace(
+            total=self.mem_total, used=used, free=self.mem_total - used
+        )
 
     def nvmlDeviceGetPowerUsage(self, handle):
         self._enter("nvmlDeviceGetPowerUsage", handle)
@@ -214,12 +216,16 @@ class FakeNvml:
         if not rows:
             raise NVMLError_NotFound("no samples")
         return [
-            SimpleNamespace(pid=pid, timeStamp=ts, smUtil=sm, memUtil=0, encUtil=0, decUtil=0)
+            SimpleNamespace(
+                pid=pid, timeStamp=ts, smUtil=sm, memUtil=0, encUtil=0, decUtil=0
+            )
             for pid, sm, ts in rows
         ]
 
 
-def fake_run(returncode=0, stdout="", stderr="", raises=None, results=None, on_call=None):
+def fake_run(
+    returncode=0, stdout="", stderr="", raises=None, results=None, on_call=None
+):
     """subprocess.run 호환 호출 가능 객체. 호출된 argv를 .argvs 에 기록한다.
 
     results: 호출 순서별 (returncode, stdout, stderr) 목록. 다 쓰면 마지막 항목을 반복한다.
@@ -236,7 +242,9 @@ def fake_run(returncode=0, stdout="", stderr="", raises=None, results=None, on_c
         if raises is not None:
             raise raises() if isinstance(raises, type) else raises
         rc, out, err = (
-            results[min(index, len(results) - 1)] if results else (returncode, stdout, stderr)
+            results[min(index, len(results) - 1)]
+            if results
+            else (returncode, stdout, stderr)
         )
         return subprocess.CompletedProcess(argv, rc, out, err)
 
@@ -269,8 +277,9 @@ class FakeCollector:
 
     @property
     def status(self):
-        return SimpleNamespace(nvml_error=FakeCollector.nvml_error,
-                               dcgm_error=FakeCollector.dcgm_error)
+        return SimpleNamespace(
+            nvml_error=FakeCollector.nvml_error, dcgm_error=FakeCollector.dcgm_error
+        )
 
 
 class FakeTime:

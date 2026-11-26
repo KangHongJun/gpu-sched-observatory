@@ -25,7 +25,14 @@ from gso.bench.pair import ProcResult
 
 MIN_OVERLAP = 0.95
 MPS_NOTE = "N/A under MPS: no context-switch events are recorded (decision 4)"
-_MEANS = ("sm_clock_mhz_mean", "power_w_mean", "sm_active_mean", "sm_occupancy_mean", "tensor_active_mean", "dram_active_mean")
+_MEANS = (
+    "sm_clock_mhz_mean",
+    "power_w_mean",
+    "sm_active_mean",
+    "sm_occupancy_mean",
+    "tensor_active_mean",
+    "dram_active_mean",
+)
 _EXTRA = ("gbps", "fps", "fps_min", "fps_p5", "frames_dropped", "backend", "build_s")
 
 
@@ -36,7 +43,9 @@ def fairness(
     return overlap, [*reasons, *extra_reasons]
 
 
-def _fairness(results: Sequence[ProcResult], duration_s: float) -> tuple[float | None, list[str]]:
+def _fairness(
+    results: Sequence[ProcResult], duration_s: float
+) -> tuple[float | None, list[str]]:
     payloads = [r.payload for r in results]
     if any(p is None for p in payloads):
         return None, ["repetition failed"]
@@ -45,7 +54,9 @@ def _fairness(results: Sequence[ProcResult], duration_s: float) -> tuple[float |
     if overlap is None:
         reasons.append("measured window missing")
     elif overlap < MIN_OVERLAP * duration_s:
-        reasons.append(f"window overlap {overlap:.2f} s is below 95 % of {duration_s:g} s")
+        reasons.append(
+            f"window overlap {overlap:.2f} s is below 95 % of {duration_s:g} s"
+        )
     for r in results:
         if r.workload != "trt_infer":
             continue
@@ -53,13 +64,28 @@ def _fairness(results: Sequence[ProcResult], duration_s: float) -> tuple[float |
         if build is None:
             reasons.append(f"trt_infer {r.label} build time unknown (build_s missing)")
         elif build != 0:
-            reasons.append(f"trt_infer {r.label} build_s={build} (engine built in a measured run)")
+            reasons.append(
+                f"trt_infer {r.label} build_s={build} (engine built in a measured run)"
+            )
     return overlap, reasons
 
 
-def build_rows(*, run_id, condition, mps, pcts, rep, results, extra, cooldown_timeout, temp_start,
-               duration_s, profile, window_means: Callable[[int, int], dict],
-               extra_reasons: Sequence[str] = ()) -> list[dict]:
+def build_rows(
+    *,
+    run_id,
+    condition,
+    mps,
+    pcts,
+    rep,
+    results,
+    extra,
+    cooldown_timeout,
+    temp_start,
+    duration_s,
+    profile,
+    window_means: Callable[[int, int], dict],
+    extra_reasons: Sequence[str] = (),
+) -> list[dict]:
     ok = all(r.payload is not None for r in results)
     overlap, reasons = fairness(results, duration_s, extra_reasons)
     means = dict.fromkeys(_MEANS)
@@ -73,23 +99,40 @@ def build_rows(*, run_id, condition, mps, pcts, rep, results, extra, cooldown_ti
     for r, pct in zip(results, pcts, strict=True):
         p = r.payload if ok else {}
         lat = p.get("latency_ms") or {}
-        rows.append({
-            "run_id": run_id, "condition": condition, "rep": rep, "proc": r.label,
-            "workload": r.workload, "ok": ok, "exit_code": r.exit_code,
-            "error": r.error or (None if ok else "peer process failed"),
-            "metric_kind": p.get("metric_kind"), "iterations": p.get("iterations"),
-            "throughput_per_s": p.get("throughput_per_s"),
-            "p50_ms": lat.get("p50"), "p95_ms": lat.get("p95"), "p99_ms": lat.get("p99"),
-            **{k: p.get(k) for k in _EXTRA},
-            "mps": mps, "client_thread_pct_requested": pct,
-            "mps_server_active_thread_pct": extra.get("server_pct") if mps else None,
-            "window_start_ns": (r.payload or {}).get("window_start_ns"),
-            "window_end_ns": (r.payload or {}).get("window_end_ns"),
-            "window_overlap_s": overlap, "fair": not reasons, "fair_reason": "; ".join(reasons) or None,
-            "cooldown_timeout": cooldown_timeout, "gpu_temp_start_c": temp_start, **means,
-            "profiled": profile,
-            "ctx_switch_rate": None if mps else prof.get("ctx_switch_rate"),
-            "ctx_switch_note": MPS_NOTE if profile and mps else prof.get("note"),
-            "overlap": None,
-        })
+        rows.append(
+            {
+                "run_id": run_id,
+                "condition": condition,
+                "rep": rep,
+                "proc": r.label,
+                "workload": r.workload,
+                "ok": ok,
+                "exit_code": r.exit_code,
+                "error": r.error or (None if ok else "peer process failed"),
+                "metric_kind": p.get("metric_kind"),
+                "iterations": p.get("iterations"),
+                "throughput_per_s": p.get("throughput_per_s"),
+                "p50_ms": lat.get("p50"),
+                "p95_ms": lat.get("p95"),
+                "p99_ms": lat.get("p99"),
+                **{k: p.get(k) for k in _EXTRA},
+                "mps": mps,
+                "client_thread_pct_requested": pct,
+                "mps_server_active_thread_pct": extra.get("server_pct")
+                if mps
+                else None,
+                "window_start_ns": (r.payload or {}).get("window_start_ns"),
+                "window_end_ns": (r.payload or {}).get("window_end_ns"),
+                "window_overlap_s": overlap,
+                "fair": not reasons,
+                "fair_reason": "; ".join(reasons) or None,
+                "cooldown_timeout": cooldown_timeout,
+                "gpu_temp_start_c": temp_start,
+                **means,
+                "profiled": profile,
+                "ctx_switch_rate": None if mps else prof.get("ctx_switch_rate"),
+                "ctx_switch_note": MPS_NOTE if profile and mps else prof.get("note"),
+                "overlap": None,
+            }
+        )
     return rows

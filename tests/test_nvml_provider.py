@@ -7,7 +7,14 @@ from gso.record import Quality, Scope
 from tests.fakes import FakeNvml
 
 NOW = 1_000_000_000
-DEVICE_METRICS = ["gpu.util", "gpu.mem_used", "gpu.power", "gpu.temp", "gpu.enc_util", "gpu.dec_util"]
+DEVICE_METRICS = [
+    "gpu.util",
+    "gpu.mem_used",
+    "gpu.power",
+    "gpu.temp",
+    "gpu.enc_util",
+    "gpu.dec_util",
+]
 
 
 def sample(fake, now=NOW, gpu=0):
@@ -24,7 +31,9 @@ def proc(recs, metric):
 
 
 def test_device_metrics_measured_in_order_with_units():
-    f = FakeNvml(util=(37, 5), mem_used=3 * 1048576, power_mw=150500, temp=61, enc=7, dec=9)
+    f = FakeNvml(
+        util=(37, 5), mem_used=3 * 1048576, power_mw=150500, temp=61, enc=7, dec=9
+    )
     recs = sample(f)
     assert [r.metric for r in recs] == DEVICE_METRICS
     assert all(r.quality is Quality.MEASURED for r in recs)
@@ -36,7 +45,9 @@ def test_every_record_carries_ts_uuid_source():
     f = FakeNvml(procs={0: [(10, 1048576)]}, proc_util={0: [(10, 5, 1)]})
     recs = sample(f, now=42)
     assert len(recs) == 9
-    assert {(r.ts_ns, r.gpu_uuid, r.source) for r in recs} == {(42, "GPU-test-0000", "nvml")}
+    assert {(r.ts_ns, r.gpu_uuid, r.source) for r in recs} == {
+        (42, "GPU-test-0000", "nvml")
+    }
 
 
 def test_uses_given_gpu_index():
@@ -46,11 +57,15 @@ def test_uses_given_gpu_index():
 
 
 def test_enc_not_supported_is_unsupported_others_measured():
-    f = FakeNvml(errors={"nvmlDeviceGetEncoderUtilization": FakeNvml.NVMLError_NotSupported})
+    f = FakeNvml(
+        errors={"nvmlDeviceGetEncoderUtilization": FakeNvml.NVMLError_NotSupported}
+    )
     d = dev(sample(f))
     assert d["gpu.enc_util"].value is None
     assert d["gpu.enc_util"].quality is Quality.UNSUPPORTED
-    assert all(d[m].quality is Quality.MEASURED for m in DEVICE_METRICS if m != "gpu.enc_util")
+    assert all(
+        d[m].quality is Quality.MEASURED for m in DEVICE_METRICS if m != "gpu.enc_util"
+    )
 
 
 def test_other_nvml_error_is_dropped_only_for_that_metric():
@@ -61,7 +76,10 @@ def test_other_nvml_error_is_dropped_only_for_that_metric():
 
 
 def test_per_device_error_form():
-    f = FakeNvml(gpus=[{}, {}], errors={"nvmlDeviceGetTemperature": {1: FakeNvml.NVMLError_NotSupported}})
+    f = FakeNvml(
+        gpus=[{}, {}],
+        errors={"nvmlDeviceGetTemperature": {1: FakeNvml.NVMLError_NotSupported}},
+    )
     assert dev(sample(f, gpu=0))["gpu.temp"].quality is Quality.MEASURED
     assert dev(sample(f, gpu=1))["gpu.temp"].quality is Quality.UNSUPPORTED
 
@@ -81,10 +99,19 @@ def test_process_metrics_and_mps_flag():
     )
     recs = sample(f)
     assert all(r.scope is Scope.PROCESS for r in recs if r.pid is not None)
-    assert {p: r.value for p, r in proc(recs, "proc.mem_used").items()} == {10: 2.0, 11: 4.0}
-    assert {p: r.value for p, r in proc(recs, "proc.is_mps").items()} == {10: 0.0, 11: 1.0}
+    assert {p: r.value for p, r in proc(recs, "proc.mem_used").items()} == {
+        10: 2.0,
+        11: 4.0,
+    }
+    assert {p: r.value for p, r in proc(recs, "proc.is_mps").items()} == {
+        10: 0.0,
+        11: 1.0,
+    }
     assert proc(recs, "proc.is_mps")[10].unit == ""
-    assert {p: r.value for p, r in proc(recs, "proc.sm_util").items()} == {10: 30, 11: 60}
+    assert {p: r.value for p, r in proc(recs, "proc.sm_util").items()} == {
+        10: 30,
+        11: 60,
+    }
     assert len(recs) == 6 + 6
 
 
@@ -97,7 +124,10 @@ def test_mps_only_process_listed_and_deduplicated():
     recs = sample(f)
     assert sorted(proc(recs, "proc.mem_used")) == [10, 12]
     assert len([r for r in recs if r.metric == "proc.mem_used"]) == 2
-    assert {p: r.value for p, r in proc(recs, "proc.is_mps").items()} == {10: 1.0, 12: 1.0}
+    assert {p: r.value for p, r in proc(recs, "proc.is_mps").items()} == {
+        10: 1.0,
+        12: 1.0,
+    }
 
 
 def test_vanished_process_skipped_entirely():
@@ -140,12 +170,17 @@ def test_listed_pid_without_sample_is_dropped_not_zero():
 
 
 def test_util_notfound_drops_all_but_mem_still_reported():
-    f = FakeNvml(procs={0: [(10, 1048576), (11, 2097152)]})  # proc_util 비어 있음 -> NotFound
+    f = FakeNvml(
+        procs={0: [(10, 1048576), (11, 2097152)]}
+    )  # proc_util 비어 있음 -> NotFound
     recs = sample(f)
     sm = proc(recs, "proc.sm_util")
     assert {r.quality for r in sm.values()} == {Quality.DROPPED}
     assert sorted(sm) == [10, 11]
-    assert {p: r.value for p, r in proc(recs, "proc.mem_used").items()} == {10: 1.0, 11: 2.0}
+    assert {p: r.value for p, r in proc(recs, "proc.mem_used").items()} == {
+        10: 1.0,
+        11: 2.0,
+    }
 
 
 def test_util_not_supported_is_unsupported_for_all():
@@ -174,7 +209,9 @@ def test_mps_list_failure_keeps_compute_processes():
     f = FakeNvml(
         procs={0: [(10, 1048576)]},
         proc_util={0: [(10, 5, 1)]},
-        errors={"nvmlDeviceGetMPSComputeRunningProcesses": FakeNvml.NVMLError_NotSupported},
+        errors={
+            "nvmlDeviceGetMPSComputeRunningProcesses": FakeNvml.NVMLError_NotSupported
+        },
     )
     assert proc(sample(f), "proc.is_mps")[10].value == 0.0
 
@@ -201,7 +238,9 @@ def test_context_manager_inits_and_shuts_down_once():
 
 
 def test_last_seen_timestamp_passed_on_second_call():
-    f = FakeNvml(procs={0: [(10, 1048576)]}, proc_util={0: [(10, 5, 111), (10, 6, 222)]})
+    f = FakeNvml(
+        procs={0: [(10, 1048576)]}, proc_util={0: [(10, 5, 111), (10, 6, 222)]}
+    )
     with NvmlProvider(0, nvml=f) as p:
         p.sample(NOW)
         p.sample(NOW + 1)

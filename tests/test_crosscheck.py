@@ -26,7 +26,12 @@ PID = "((globalPid >> 24) & 16777215)"  # schema 2.2
 CTX = "GPU_CONTEXT_SWITCH_EVENTS"
 KER = "CUPTI_ACTIVITY_KIND_KERNEL"
 LOADER_TABLES = (
-    CTX, "ENUM_GPU_CTX_SWITCH", KER, "CUPTI_ACTIVITY_KIND_RUNTIME", "StringIds", "DIAGNOSTIC_EVENT",
+    CTX,
+    "ENUM_GPU_CTX_SWITCH",
+    KER,
+    "CUPTI_ACTIVITY_KIND_RUNTIME",
+    "StringIds",
+    "DIAGNOSTIC_EVENT",
 )
 
 fixtures = pytest.mark.parametrize("path", FIXTURES, ids=lambda p: p.stem)
@@ -41,7 +46,9 @@ def sql(path, query, params=()):
 
 
 def has(path, table):
-    return bool(sql(path, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)))
+    return bool(
+        sql(path, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,))
+    )
 
 
 @fixtures
@@ -55,7 +62,10 @@ def test_kernel_count_and_total_duration(path):
         pytest.skip("no kernel table in this fixture")
     kernels = load_kernels(path)
     assert len(kernels) == sql(path, f"SELECT COUNT(*) FROM {KER}")[0][0]
-    assert sum(kernel_durations(kernels)) == sql(path, f"SELECT SUM(end - start) FROM {KER}")[0][0]
+    assert (
+        sum(kernel_durations(kernels))
+        == sql(path, f"SELECT SUM(end - start) FROM {KER}")[0][0]
+    )
 
 
 @fixtures
@@ -70,8 +80,14 @@ def test_per_pid_kernel_count_first_start_last_end(path):
     assert {k.pid for k in kernels} == {r[0] for r in expected}
     for pid, count, first, last in expected:
         mine = [k for k in kernels if k.pid == pid]
-        assert (len(mine), min(k.start_ns for k in mine), max(k.end_ns for k in mine)) == (
-            count, first, last,
+        assert (
+            len(mine),
+            min(k.start_ns for k in mine),
+            max(k.end_ns for k in mine),
+        ) == (
+            count,
+            first,
+            last,
         )
 
 
@@ -102,7 +118,8 @@ def test_per_gpu_pid_restore_and_save_counts(path):
 def _window_w1(path):
     """Schema 4.3: w0 = 0, w1 = max(stopped row ts, max event ts over every gpuId)."""
     stopped = sql(
-        path, "SELECT MAX(timestamp) FROM DIAGNOSTIC_EVENT WHERE text = 'Profiling has stopped.'"
+        path,
+        "SELECT MAX(timestamp) FROM DIAGNOSTIC_EVENT WHERE text = 'Profiling has stopped.'",
     )[0][0]
     last = sql(path, f"SELECT MAX(timestamp) FROM {CTX}")[0][0]
     return max(v for v in (stopped, last) if v is not None)
@@ -154,9 +171,14 @@ def _synthetic(path, events, stopped_at=None):
         "CREATE TABLE DIAGNOSTIC_EVENT (timestamp INTEGER, text TEXT);"
     )
     for i, (tag, gpid, gpu, ts) in enumerate(events):
-        con.execute(f"INSERT INTO {CTX} VALUES (?, 0, ?, 1, ?, ?, ?)", (tag, i, ts, gpid, gpu))
+        con.execute(
+            f"INSERT INTO {CTX} VALUES (?, 0, ?, 1, ?, ?, ?)", (tag, i, ts, gpid, gpu)
+        )
     if stopped_at is not None:
-        con.execute("INSERT INTO DIAGNOSTIC_EVENT VALUES (?, 'Profiling has stopped.')", (stopped_at,))
+        con.execute(
+            "INSERT INTO DIAGNOSTIC_EVENT VALUES (?, 'Profiling has stopped.')",
+            (stopped_at,),
+        )
     con.commit()
     con.close()
     return path
@@ -195,7 +217,9 @@ def test_report_raw_counts_equal_sql_counts(path):
     mode = "launched" if has(path, KER) else "global"
     counts = build_summary(path, gpu=1, mode=mode, masked=True)["raw_counts"]
     expected = {
-        t: sql(path, f"SELECT COUNT(*) FROM {t}")[0][0] for t in LOADER_TABLES if has(path, t)
+        t: sql(path, f"SELECT COUNT(*) FROM {t}")[0][0]
+        for t in LOADER_TABLES
+        if has(path, t)
     }
     assert counts == expected
 
@@ -205,8 +229,16 @@ def test_crosscheck_script_exits_zero_and_prints_no_pid(path):
     pids = {str(r[0]) for r in sql(path, f"SELECT DISTINCT {PID} FROM {CTX}") if r[0]}
     gpu = "1"
     res = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "verify" / "21_crosscheck.py"), str(path), "--gpu", gpu],
-        capture_output=True, text=True, check=False,
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "verify" / "21_crosscheck.py"),
+            str(path),
+            "--gpu",
+            gpu,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert res.returncode == 0, res.stdout + res.stderr
     assert "✗" not in res.stdout
@@ -218,8 +250,16 @@ def test_crosscheck_script_exits_zero_and_prints_no_pid(path):
 def test_crosscheck_script_on_masked_only_gpu_prints_only_masked_labels():
     path = FIX / "nsys_ctxsw_min.sqlite"
     res = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "verify" / "21_crosscheck.py"), str(path), "--gpu", "0"],
-        capture_output=True, text=True, check=False,
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "verify" / "21_crosscheck.py"),
+            str(path),
+            "--gpu",
+            "0",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert res.returncode == 0, res.stdout + res.stderr
     assert "GPU 0 ctx, masked:" in res.stdout

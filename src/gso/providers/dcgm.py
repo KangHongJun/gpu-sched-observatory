@@ -32,7 +32,9 @@ SOURCE = "dcgm"
 _MIN_INTERVAL_MS = 100
 
 
-def parse_dmon_line(line: str, field_ids: Sequence[int]) -> dict[int, float | None] | None:
+def parse_dmon_line(
+    line: str, field_ids: Sequence[int]
+) -> dict[int, float | None] | None:
     """Parse one ``dcgmi dmon`` line. None for headers, blanks and anything not a GPU row."""
     toks = line.split()
     if len(toks) < 2 or toks[0] != "GPU" or not toks[1].isdigit():
@@ -66,7 +68,9 @@ class DcgmProvider:
         run_seconds: float = 15.0,
     ) -> None:
         if interval_ms < _MIN_INTERVAL_MS:
-            raise ValueError(f"interval_ms must be >= {_MIN_INTERVAL_MS}, got {interval_ms}")
+            raise ValueError(
+                f"interval_ms must be >= {_MIN_INTERVAL_MS}, got {interval_ms}"
+            )
         if not run_seconds > 0:
             raise ValueError(f"run_seconds must be > 0, got {run_seconds!r}")
         self.gpu_index = gpu_index
@@ -91,9 +95,16 @@ class DcgmProvider:
 
     def _argv(self) -> list[str]:
         return [
-            *self._cmd, "dmon", "-i", str(self.gpu_index),
-            "-e", ",".join(str(i) for i in self._requested),
-            "-d", str(self._interval_ms), "-c", str(self._count),
+            *self._cmd,
+            "dmon",
+            "-i",
+            str(self.gpu_index),
+            "-e",
+            ",".join(str(i) for i in self._requested),
+            "-d",
+            str(self._interval_ms),
+            "-c",
+            str(self._count),
         ]
 
     def _spawn_locked(self):
@@ -102,8 +113,13 @@ class DcgmProvider:
             return None
         try:
             proc = self._popen(
-                self._argv(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, encoding="utf-8", errors="replace",
+                self._argv(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                encoding="utf-8",
+                errors="replace",
             )
         except OSError as e:
             self.error = f"failed to start dcgmi: {e}"
@@ -134,11 +150,27 @@ class DcgmProvider:
             if fid not in row:
                 rec = unsupported(ts, self.gpu_uuid, metric, "%", SOURCE, Scope.DEVICE)
             elif row[fid] is None:
-                rec = Record(ts, self.gpu_uuid, metric, None, "%", SOURCE,
-                             Scope.DEVICE, Quality.DROPPED)
+                rec = Record(
+                    ts,
+                    self.gpu_uuid,
+                    metric,
+                    None,
+                    "%",
+                    SOURCE,
+                    Scope.DEVICE,
+                    Quality.DROPPED,
+                )
             else:
-                rec = Record(ts, self.gpu_uuid, metric, row[fid] * 100, "%", SOURCE,
-                             Scope.DEVICE, Quality.MEASURED)
+                rec = Record(
+                    ts,
+                    self.gpu_uuid,
+                    metric,
+                    row[fid] * 100,
+                    "%",
+                    SOURCE,
+                    Scope.DEVICE,
+                    Quality.MEASURED,
+                )
             self._buffer.push(rec)
 
     @staticmethod

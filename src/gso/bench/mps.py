@@ -131,7 +131,9 @@ def ensure_safe(
         try:
             import pynvml as nvml
         except Exception as e:
-            raise UnsafeGpuError(f"cannot import NVML to check GPU {gpu_index}: {e}") from e
+            raise UnsafeGpuError(
+                f"cannot import NVML to check GPU {gpu_index}: {e}"
+            ) from e
 
     foreign = _foreign_gpu_processes(gpu_index, nvml, own)
     if foreign:
@@ -161,7 +163,9 @@ def _foreign_gpu_processes(gpu_index, nvml, own: set[int]) -> int:
                 raise UnsafeGpuError(f"invalid GPU index {gpu_index!r}")
             count = nvml.nvmlDeviceGetCount()
             if not 0 <= gpu_index < count:
-                raise UnsafeGpuError(f"invalid GPU index {gpu_index} (machine has {count})")
+                raise UnsafeGpuError(
+                    f"invalid GPU index {gpu_index} (machine has {count})"
+                )
             handle = nvml.nvmlDeviceGetHandleByIndex(gpu_index)
             pids: list[int] = []
             for fn in (
@@ -183,7 +187,9 @@ def _foreign_gpu_processes(gpu_index, nvml, own: set[int]) -> int:
 # ---- control channel (quit) ---------------------------------------------------------------
 
 
-def _send_control(command: str, pipe_dir: str, log_dir: str, run) -> subprocess.CompletedProcess:
+def _send_control(
+    command: str, pipe_dir: str, log_dir: str, run
+) -> subprocess.CompletedProcess:
     """The only place ``quit`` leaves this module; anything but the exact string ``quit`` is
     refused. Kept apart from the read-only provider's allow-list on purpose."""
     if type(command) is not str or command not in _CONTROL_ALLOWED:
@@ -266,7 +272,9 @@ class MpsSession:
     ):
         self.gpu_index = gpu_index
         self.base_dir = (
-            Path(base_dir) if base_dir is not None else Path(f"/tmp/gso-mps-{os.getuid()}")
+            Path(base_dir)
+            if base_dir is not None
+            else Path(f"/tmp/gso-mps-{os.getuid()}")
         )
         self._run = run
         self._nvml = nvml
@@ -280,7 +288,9 @@ class MpsSession:
         self._start_time = process_start_time
         self._lock_fd: int | None = None
         self._started = False
-        self._control: dict[int, tuple[int, int] | None] = {}  # pid -> identity at start
+        self._control: dict[
+            int, tuple[int, int] | None
+        ] = {}  # pid -> identity at start
         self._servers: dict[int, tuple[int, int] | None] = {}
 
     # -- paths / env --
@@ -304,7 +314,9 @@ class MpsSession:
         env = {_PIPE_ENV: self.pipe_dir, _LOG_ENV: self.log_dir}
         if thread_pct is not None:
             if type(thread_pct) is not int or not 1 <= thread_pct <= 100:
-                raise ValueError(f"thread_pct must be an int in 1..100, got {thread_pct!r}")
+                raise ValueError(
+                    f"thread_pct must be an int in 1..100, got {thread_pct!r}"
+                )
             env[_THREAD_ENV] = str(thread_pct)
         return env
 
@@ -327,7 +339,11 @@ class MpsSession:
         if b.exists() and (not b.is_dir() or not self._owner_check(b)):
             raise UnsafeGpuError(f"refusing {b}: not a directory owned by this user")
         b.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if b.is_symlink() or not stat.S_ISDIR(b.lstat().st_mode) or not self._owner_check(b):
+        if (
+            b.is_symlink()
+            or not stat.S_ISDIR(b.lstat().st_mode)
+            or not self._owner_check(b)
+        ):
             raise UnsafeGpuError(f"refusing {b}: not a directory owned by this user")
         os.chmod(b, 0o700)
         for sub in (self.pipe_dir, self.log_dir):
@@ -370,7 +386,9 @@ class MpsSession:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             os.close(fd)
-            raise UnsafeGpuError("another gso MPS session of this user is active") from None
+            raise UnsafeGpuError(
+                "another gso MPS session of this user is active"
+            ) from None
         self._lock_fd = fd
 
     def _release_lock(self) -> None:
@@ -390,7 +408,9 @@ class MpsSession:
 
     def _start(self) -> None:
         if self._query().active:
-            raise UnsafeGpuError(f"an MPS daemon already answers on {self.pipe_dir}; refusing")
+            raise UnsafeGpuError(
+                f"an MPS daemon already answers on {self.pipe_dir}; refusing"
+            )
         t0_wall = time.time()
         try:
             r = self._run(
@@ -407,7 +427,9 @@ class MpsSession:
         if r.returncode != 0:
             self._adopt_if_started_by_us(t0_wall)
             detail = (r.stderr or r.stdout or "").strip()[:200]
-            raise UnsafeGpuError(f"MPS daemon failed to start (exit {r.returncode}): {detail}")
+            raise UnsafeGpuError(
+                f"MPS daemon failed to start (exit {r.returncode}): {detail}"
+            )
         deadline = time.monotonic() + self._start_timeout_s
         while not self._query().active:
             if time.monotonic() >= deadline:

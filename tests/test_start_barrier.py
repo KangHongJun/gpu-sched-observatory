@@ -27,9 +27,13 @@ def _run(tmp_path, monkeypatch, fake, measure, extra=()):
     monkeypatch.setattr(_common, "select_gpu", lambda n: None)
     out = tmp_path / "o.json"
     rc = _common.run_cli(
-        "x", "d", lambda p: None, measure,
+        "x",
+        "d",
+        lambda p: None,
+        measure,
         ["--gpu", "0", "--duration", "0.02", "--out", str(out), *extra],
-        clock=fake.clock, sleep=fake.sleep,
+        clock=fake.clock,
+        sleep=fake.sleep,
     )
     return rc, out
 
@@ -47,18 +51,26 @@ def _measure(fake):
 
 def test_waits_until_start_at_then_measures(tmp_path, monkeypatch):
     fake = FakeClock(1000.0)
-    rc, out = _run(tmp_path, monkeypatch, fake, _measure(fake), ["--start-at", "1005.0"])
+    rc, out = _run(
+        tmp_path, monkeypatch, fake, _measure(fake), ["--start-at", "1005.0"]
+    )
     assert rc == 0
     d = json.loads(out.read_text())
     assert d["window_start_ns"] >= 1005 * 10**9
-    assert d["window_start_ns"] - 1005 * 10**9 < 10**7  # no extra waiting past the barrier
+    assert (
+        d["window_start_ns"] - 1005 * 10**9 < 10**7
+    )  # no extra waiting past the barrier
     assert d["window_end_ns"] > d["window_start_ns"]
-    assert sum(fake.sleeps) == pytest.approx(5.0 - 0.003, abs=0.06)  # 3 warm-up steps ran first
+    assert sum(fake.sleeps) == pytest.approx(
+        5.0 - 0.003, abs=0.06
+    )  # 3 warm-up steps ran first
 
 
 def test_missed_barrier_exits_1_and_writes_nothing(tmp_path, monkeypatch, capsys):
     fake = FakeClock(1000.0)
-    rc, _out = _run(tmp_path, monkeypatch, fake, _measure(fake), ["--start-at", "999.0"])
+    rc, _out = _run(
+        tmp_path, monkeypatch, fake, _measure(fake), ["--start-at", "999.0"]
+    )
     assert rc == 1
     err = capsys.readouterr().err.strip()
     assert "start barrier missed" in err and "\n" not in err
@@ -146,14 +158,24 @@ def test_decode_gate_missed_when_warmup_ended_after_start_at():
 
 @pytest.mark.parametrize(
     "argv",
-    [["--gp", "0", "--duration", "1"], ["--gpu", "0", "--dur", "1"],
-     ["--gpu", "0", "--duration", "1", "--start", "5"]],
+    [
+        ["--gp", "0", "--duration", "1"],
+        ["--gpu", "0", "--dur", "1"],
+        ["--gpu", "0", "--duration", "1", "--start", "5"],
+    ],
 )
-def test_abbreviated_reserved_flags_are_rejected_by_the_workload_parser(tmp_path, monkeypatch, argv):
+def test_abbreviated_reserved_flags_are_rejected_by_the_workload_parser(
+    tmp_path, monkeypatch, argv
+):
     monkeypatch.setattr(_common, "select_gpu", lambda n: None)
     with pytest.raises(SystemExit) as e:
-        _common.run_cli("x", "d", lambda p: None, lambda a, s: ([1.0], 1.0, {}),
-                        [*argv, "--out", str(tmp_path / "o.json")])
+        _common.run_cli(
+            "x",
+            "d",
+            lambda p: None,
+            lambda a, s: ([1.0], 1.0, {}),
+            [*argv, "--out", str(tmp_path / "o.json")],
+        )
     assert e.value.code == 2
 
 
@@ -161,18 +183,26 @@ def test_abbreviated_reserved_flags_are_rejected_by_the_workload_parser(tmp_path
 
 
 def test_progress_deadline_includes_the_remaining_barrier_wait():
-    assert decode.progress_deadline_s(now=1000.0, start_at=None, duration_s=10) == \
-        decode.WARMUP_S + 10 + 15.0
-    assert decode.progress_deadline_s(now=1000.0, start_at=1060.0, duration_s=10) == \
-        60.0 + decode.WARMUP_S + 10 + 15.0
-    assert decode.progress_deadline_s(now=1100.0, start_at=1060.0, duration_s=10) == \
-        decode.WARMUP_S + 10 + 15.0  # barrier already passed
+    assert (
+        decode.progress_deadline_s(now=1000.0, start_at=None, duration_s=10)
+        == decode.WARMUP_S + 10 + 15.0
+    )
+    assert (
+        decode.progress_deadline_s(now=1000.0, start_at=1060.0, duration_s=10)
+        == 60.0 + decode.WARMUP_S + 10 + 15.0
+    )
+    assert (
+        decode.progress_deadline_s(now=1100.0, start_at=1060.0, duration_s=10)
+        == decode.WARMUP_S + 10 + 15.0
+    )  # barrier already passed
 
 
 def test_decode_starts_ffmpeg_just_before_the_barrier_not_at_once():
     lead = decode.WARMUP_S + decode.LEAD_S
     assert decode.pre_start_delay_s(now=1000.0, start_at=None) == 0.0
-    assert decode.pre_start_delay_s(now=1000.0, start_at=1060.0) == pytest.approx(60.0 - lead)
+    assert decode.pre_start_delay_s(now=1000.0, start_at=1060.0) == pytest.approx(
+        60.0 - lead
+    )
     assert decode.pre_start_delay_s(now=1059.0, start_at=1060.0) == 0.0
 
 
@@ -182,7 +212,11 @@ class _FakeQueue:
     def __init__(self, fake, n_blocks):
         self.fake, self.lines = fake, []
         for i in range(n_blocks):
-            self.lines += [f"frame={(i + 1) * 15}\n", "drop_frames=0\n", "progress=continue\n"]
+            self.lines += [
+                f"frame={(i + 1) * 15}\n",
+                "drop_frames=0\n",
+                "progress=continue\n",
+            ]
 
     def get(self, timeout=None):
         line = self.lines.pop(0)
@@ -209,10 +243,16 @@ class _FakeFfmpeg:
 def _decode_run(monkeypatch, fake, start_at, duration, n_blocks):
     spawned = []
     monkeypatch.setattr(decode, "ensure_video", lambda stop: "video.mp4")
-    monkeypatch.setattr(decode.subprocess, "Popen", lambda *a, **k: _FakeFfmpeg(fake, spawned))
-    monkeypatch.setattr(decode, "_start_readers", lambda proc: (_FakeQueue(fake, n_blocks), []))
+    monkeypatch.setattr(
+        decode.subprocess, "Popen", lambda *a, **k: _FakeFfmpeg(fake, spawned)
+    )
+    monkeypatch.setattr(
+        decode, "_start_readers", lambda proc: (_FakeQueue(fake, n_blocks), [])
+    )
     monkeypatch.setattr(decode, "_now", fake.clock)
-    monkeypatch.setattr(_common, "_ctx", _common.RunContext(start_at, fake.clock, fake.sleep))
+    monkeypatch.setattr(
+        _common, "_ctx", _common.RunContext(start_at, fake.clock, fake.sleep)
+    )
     args = type("A", (), {"duration": duration})()
     res = decode.measure(args, _common.StopFlag())
     return res, spawned, _common.current().window

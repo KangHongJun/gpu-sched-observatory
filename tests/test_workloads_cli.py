@@ -14,7 +14,10 @@ def _run(name, *args):
     t0 = time.perf_counter()
     p = subprocess.run(
         [sys.executable, "-m", f"gso.bench.workloads.{name}", *args],
-        check=False, capture_output=True, text=True, timeout=60,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     return p, time.perf_counter() - t0
 
@@ -41,7 +44,9 @@ def test_import_does_not_load_torch(name):
         f"importlib.import_module('gso.bench.workloads.{name}');"
         "assert 'torch' not in sys.modules and 'tensorrt' not in sys.modules"
     )
-    p = subprocess.run([sys.executable, "-c", code], check=False, capture_output=True, text=True)
+    p = subprocess.run(
+        [sys.executable, "-c", code], check=False, capture_output=True, text=True
+    )
     assert p.returncode == 0, p.stderr
 
 
@@ -51,7 +56,9 @@ def test_workloads_equals_package_modules():
 
     import gso.bench.workloads as pkg
 
-    mods = {m.name for m in pkgutil.iter_modules(pkg.__path__) if not m.name.startswith("_")}
+    mods = {
+        m.name for m in pkgutil.iter_modules(pkg.__path__) if not m.name.startswith("_")
+    }
     if importlib.util.find_spec("tensorrt") is None:
         mods.discard("trt_infer")
     assert set(workloads.WORKLOADS) == mods

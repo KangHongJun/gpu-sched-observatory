@@ -23,7 +23,17 @@ def test_value_none_requires_non_measured_quality():
 
 
 def test_json_roundtrip():
-    r = Record(5, "GPU-x", "gpu.util", 78.0, "%", "nvml", Scope.PROCESS, Quality.MEASURED, pid=1421)
+    r = Record(
+        5,
+        "GPU-x",
+        "gpu.util",
+        78.0,
+        "%",
+        "nvml",
+        Scope.PROCESS,
+        Quality.MEASURED,
+        pid=1421,
+    )
     assert from_json(to_json(r)) == r
 
 
@@ -55,5 +65,15 @@ def test_json_roundtrip_unsupported():
 
 
 def test_to_json_is_single_line():
-    r = Record(5, "GPU-x", "gpu.util", 78.0, "%", "nvml", Scope.PROCESS, Quality.MEASURED, pid=1421)
+    r = Record(
+        5,
+        "GPU-x",
+        "gpu.util",
+        78.0,
+        "%",
+        "nvml",
+        Scope.PROCESS,
+        Quality.MEASURED,
+        pid=1421,
+    )
     assert "\n" not in to_json(r)

@@ -28,7 +28,9 @@ from pathlib import Path
 
 TERM_GRACE_S = 10.0
 POLL_S = 0.2
-DEADLINE_GRACE_S = 60.0  # after the window should have ended: result writing and process exit
+DEADLINE_GRACE_S = (
+    60.0  # after the window should have ended: result writing and process exit
+)
 _TAIL_CHARS = 300
 _NEEDED = ("throughput_per_s", "latency_ms", "metric_kind")
 
@@ -53,13 +55,26 @@ class ProcResult:
 
 
 def workload_argv(
-    workload: str, gpu_arg: int, duration_s: float, out: Path, start_at: float | None,
+    workload: str,
+    gpu_arg: int,
+    duration_s: float,
+    out: Path,
+    start_at: float | None,
     extra: Sequence[str],
 ) -> list[str]:
     import sys
 
-    argv = [sys.executable, "-m", f"gso.bench.workloads.{workload}", "--gpu", str(gpu_arg),
-            "--duration", f"{duration_s:g}", "--out", str(out)]
+    argv = [
+        sys.executable,
+        "-m",
+        f"gso.bench.workloads.{workload}",
+        "--gpu",
+        str(gpu_arg),
+        "--duration",
+        f"{duration_s:g}",
+        "--out",
+        str(out),
+    ]
     if start_at is not None:
         argv += ["--start-at", f"{start_at:.3f}"]
     return argv + list(extra)
@@ -96,12 +111,19 @@ def _tail(err) -> str:
     return " | ".join(lines[-3:])[-_TAIL_CHARS:]
 
 
-def terminate(groups: Sequence[Group], killpg=os.killpg, grace_s: float = TERM_GRACE_S) -> None:
+def terminate(
+    groups: Sequence[Group], killpg=os.killpg, grace_s: float = TERM_GRACE_S
+) -> None:
     """SIGTERM then SIGKILL the process groups of still-running processes we launched."""
     running = []
     for g in groups:
         pid = g.proc.pid
-        if g.proc.poll() is not None or not isinstance(pid, int) or pid <= 1 or pid == os.getpid():
+        if (
+            g.proc.poll() is not None
+            or not isinstance(pid, int)
+            or pid <= 1
+            or pid == os.getpid()
+        ):
             continue
         with contextlib.suppress(ProcessLookupError, PermissionError):
             killpg(pid, signal.SIGTERM)
@@ -123,7 +145,9 @@ def _result(g: Group) -> ProcResult:
     if error is None and code == 0:
         try:
             payload = json.loads(g.spec.out_path.read_text())
-            missing = [k for k in _NEEDED if not isinstance(payload, dict) or k not in payload]
+            missing = [
+                k for k in _NEEDED if not isinstance(payload, dict) or k not in payload
+            ]
             if missing:
                 payload, error = None, f"result JSON lacks {', '.join(missing)}"
         except (OSError, ValueError) as e:
@@ -156,8 +180,12 @@ def run_procs(
             for spec in specs:
                 err = stack.enter_context(tempfile.TemporaryFile())
                 proc = launch(
-                    spec.argv, env=spec.env, stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=err, start_new_session=True,
+                    spec.argv,
+                    env=spec.env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=err,
+                    start_new_session=True,
                 )
                 groups.append(Group(spec, proc, err))
                 if on_launch is not None:

@@ -13,8 +13,17 @@ from gso.buffer import RingBuffer
 from gso.record import Record, from_json, to_json
 
 CSV_COLUMNS = (
-    "ts_ns", "gpu_uuid", "pid", "context_id", "stream_id",
-    "metric", "value", "unit", "source", "scope", "quality",
+    "ts_ns",
+    "gpu_uuid",
+    "pid",
+    "context_id",
+    "stream_id",
+    "metric",
+    "value",
+    "unit",
+    "source",
+    "scope",
+    "quality",
 )
 SUPPORTED_EXTENSIONS = (".jsonl", ".csv")
 
@@ -25,10 +34,19 @@ def _cell(v) -> str:
 
 def csv_row(r: Record) -> list[str]:
     return [
-        _cell(r.ts_ns), r.gpu_uuid, _cell(r.pid), _cell(r.context_id), _cell(r.stream_id),
+        _cell(r.ts_ns),
+        r.gpu_uuid,
+        _cell(r.pid),
+        _cell(r.context_id),
+        _cell(r.stream_id),
         r.metric,
-        "" if r.value is None else repr(float(r.value)),  # shortest string that round-trips
-        r.unit, r.source, r.scope.value, r.quality.value,
+        ""
+        if r.value is None
+        else repr(float(r.value)),  # shortest string that round-trips
+        r.unit,
+        r.source,
+        r.scope.value,
+        r.quality.value,
     ]
 
 
@@ -196,7 +214,9 @@ class Drainer:
     def drain(self) -> int:
         records, nxt, lost = self._buffer.read_from(self.cursor)
         self.lost += lost
-        self.cursor = nxt - len(records)  # sequence number of records[0]; skips the lost range
+        self.cursor = nxt - len(
+            records
+        )  # sequence number of records[0]; skips the lost range
         n = 0
         for r in records:
             self._sink.write([r])

@@ -33,7 +33,6 @@ EXIT_UNAVAILABLE = 1
 EXIT_INTERRUPTED = 130
 
 
-
 @dataclass
 class ThroughputOnly:
     """지연 분포를 주장하지 않는 워크로드의 결과: 반복 수, 측정 시간 s, 추가 키.
@@ -86,7 +85,9 @@ class StopFlag:
 class RunContext:
     """한 번의 CLI 실행이 쓰는 시계와 시작 장벽, 기록된 측정 창(epoch s)."""
 
-    def __init__(self, start_at: float | None = None, clock=time.time, sleep=time.sleep):
+    def __init__(
+        self, start_at: float | None = None, clock=time.time, sleep=time.sleep
+    ):
         self.start_at = start_at
         self.clock = clock
         self.sleep = sleep
@@ -227,7 +228,10 @@ def run_cli(
     parser.add_argument("--duration", type=float, required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument(
-        "--start-at", type=_start_at, default=None, metavar="EPOCH_S",
+        "--start-at",
+        type=_start_at,
+        default=None,
+        metavar="EPOCH_S",
         help="wall-clock time (epoch seconds) at which the measured loop starts, after setup "
         "and warm-up; exit 1 without a result if it has already passed",
     )

@@ -36,8 +36,13 @@ def test_gpu_is_required():
 
 @pytest.mark.parametrize(
     "bad",
-    [["--interval", "0"], ["--interval", "-1"], ["--dcgm-interval-ms", "50"],
-     ["--interval", "nan"], ["--interval", "inf"]],
+    [
+        ["--interval", "0"],
+        ["--interval", "-1"],
+        ["--dcgm-interval-ms", "50"],
+        ["--interval", "nan"],
+        ["--interval", "inf"],
+    ],
 )
 def test_bad_intervals_rejected(bad):
     with pytest.raises(SystemExit) as e:
@@ -54,12 +59,26 @@ def test_build_live_wires_collector_without_starting(monkeypatch):
 
     monkeypatch.setattr(cli, "detect", fake_detect)
     args = cli.build_parser().parse_args(
-        ["live", "--gpu", "1", "--interval", "0.5", "--dcgm-interval-ms", "200",
-         "--dcgmi-cmd", "docker exec gso-dcgm dcgmi", "--dcgm-gpu-index", "0"]
+        [
+            "live",
+            "--gpu",
+            "1",
+            "--interval",
+            "0.5",
+            "--dcgm-interval-ms",
+            "200",
+            "--dcgmi-cmd",
+            "docker exec gso-dcgm dcgmi",
+            "--dcgm-gpu-index",
+            "0",
+        ]
     )
     app = cli.build_live(args)
     assert isinstance(app, GsoApp)
-    assert seen == {"dcgmi_cmd": ["docker", "exec", "gso-dcgm", "dcgmi"], "dcgm_gpu_index": 0}
+    assert seen == {
+        "dcgmi_cmd": ["docker", "exec", "gso-dcgm", "dcgmi"],
+        "dcgm_gpu_index": 0,
+    }
     c = app._collector
     assert isinstance(c, Collector)
     assert c._interval_s == 0.5
@@ -78,9 +97,10 @@ def test_buffer_capacity_covers_five_minutes():
 # -- export / headless ---------------------------------------------------------
 
 
-
 def mk(ts, metric="gpu.util", value=50.0):
-    return Record(ts, "GPU-test-0001", metric, value, "%", "nvml", Scope.DEVICE, Quality.MEASURED)
+    return Record(
+        ts, "GPU-test-0001", metric, value, "%", "nvml", Scope.DEVICE, Quality.MEASURED
+    )
 
 
 @pytest.fixture
@@ -102,15 +122,21 @@ def run_main(argv, ft=None):
 @pytest.mark.parametrize(
     "argv",
     [
-        ["--headless", "--export", "{p}/o.jsonl"],                      # no duration
-        ["--headless", "--duration", "5"],                              # no export
-        ["--duration", "5", "--export", "{p}/o.jsonl"],                 # duration w/o headless
+        ["--headless", "--export", "{p}/o.jsonl"],  # no duration
+        ["--headless", "--duration", "5"],  # no export
+        ["--duration", "5", "--export", "{p}/o.jsonl"],  # duration w/o headless
         ["--headless", "--duration", "0", "--export", "{p}/o.jsonl"],
         ["--headless", "--duration", "-3", "--export", "{p}/o.jsonl"],
         ["--headless", "--duration", "nan", "--export", "{p}/o.jsonl"],
-        ["--headless", "--duration", "5", "--export", "{p}/o.txt"],     # bad extension
-        ["--headless", "--duration", "5", "--export", "{p}/nodir/o.jsonl"],  # parent missing
-        ["--export", "{p}/o.parquet"],                                  # interactive, bad ext
+        ["--headless", "--duration", "5", "--export", "{p}/o.txt"],  # bad extension
+        [
+            "--headless",
+            "--duration",
+            "5",
+            "--export",
+            "{p}/nodir/o.jsonl",
+        ],  # parent missing
+        ["--export", "{p}/o.parquet"],  # interactive, bad ext
         ["--interval", "0.05"],
         ["--headless", "--duration", "5", "--export", "{p}"],  # target is a directory
     ],
@@ -146,17 +172,25 @@ def test_headless_writes_expected_records(tmp_path, fake_collector, capsys):
     assert c.starts == 1 and c.stops == 1
     assert sum(ft.sleeps) == pytest.approx(3.0)
     recs = read_jsonl(out)
-    assert [r.metric for r in recs] == ["a", "b"] + [f"s{n}" for n in range(1, len(ft.sleeps) + 1)]
+    assert [r.metric for r in recs] == ["a", "b"] + [
+        f"s{n}" for n in range(1, len(ft.sleeps) + 1)
+    ]
     err = capsys.readouterr().err.strip().splitlines()
     assert len(err) == 1
-    assert f"wrote {len(recs)} records" in err[0] and str(out) in err[0] and "3.0s" in err[0]
+    assert (
+        f"wrote {len(recs)} records" in err[0]
+        and str(out) in err[0]
+        and "3.0s" in err[0]
+    )
     assert "dropped" not in err[0]
 
 
 def test_headless_csv(tmp_path, fake_collector):
     out = tmp_path / "o.CSV"
     fake_collector.records_on_start = [mk(1)]
-    code, _ = run_main(["live", "--gpu", "1", "--headless", "--duration", "1", "--export", str(out)])
+    code, _ = run_main(
+        ["live", "--gpu", "1", "--headless", "--duration", "1", "--export", str(out)]
+    )
     assert code == 0
     lines = out.read_text(encoding="utf-8").splitlines()
     assert lines[0].startswith("ts_ns,gpu_uuid,pid") and len(lines) == 2
@@ -186,7 +220,9 @@ def test_headless_zero_records_exits_1_with_reason(tmp_path, fake_collector, cap
     fake_collector.nvml_error = "NVMLError: no driver"
     fake_collector.dcgm_error = "host engine down"
     out = tmp_path / "o.jsonl"
-    code, _ = run_main(["live", "--gpu", "1", "--headless", "--duration", "1", "--export", str(out)])
+    code, _ = run_main(
+        ["live", "--gpu", "1", "--headless", "--duration", "1", "--export", str(out)]
+    )
     assert code == 1
     err = capsys.readouterr().err.splitlines()
     assert any("wrote 0 records" in ln for ln in err)
@@ -195,11 +231,15 @@ def test_headless_zero_records_exits_1_with_reason(tmp_path, fake_collector, cap
     assert not out.exists() and list(tmp_path.iterdir()) == []  # nothing to commit
 
 
-def test_headless_status_errors_printed_each_line_even_with_records(tmp_path, fake_collector, capsys):
+def test_headless_status_errors_printed_each_line_even_with_records(
+    tmp_path, fake_collector, capsys
+):
     fake_collector.records_on_start = [mk(1)]
     fake_collector.dcgm_error = "host engine down"
     out = tmp_path / "o.jsonl"
-    code, _ = run_main(["live", "--gpu", "1", "--headless", "--duration", "1", "--export", str(out)])
+    code, _ = run_main(
+        ["live", "--gpu", "1", "--headless", "--duration", "1", "--export", str(out)]
+    )
     assert code == 0
     err = capsys.readouterr().err.splitlines()
     assert len(err) == 2 and "host engine down" in err[1]
@@ -231,8 +271,16 @@ def test_headless_stops_collector_when_loop_fails(tmp_path, fake_collector):
 
     with pytest.raises(RuntimeError):
         run_main(
-            ["live", "--gpu", "1", "--headless", "--duration", "5", "--export",
-             str(tmp_path / "o.jsonl")],
+            [
+                "live",
+                "--gpu",
+                "1",
+                "--headless",
+                "--duration",
+                "5",
+                "--export",
+                str(tmp_path / "o.jsonl"),
+            ],
             FakeTime(on_sleep),
         )
     assert fake_collector.made[0].stops == 1
@@ -265,8 +313,13 @@ def test_headless_does_not_import_textual():
         print("ok")
         """
     )
-    r = subprocess.run([sys.executable, "-c", script], check=False,
-                       capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent.parent))
+    r = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parent.parent),
+    )
     assert r.returncode == 0, r.stdout + r.stderr
     assert "ok" in r.stdout
 
@@ -330,7 +383,9 @@ def test_headless_normal_run_replaces_old_target_no_partial(tmp_path, fake_colle
     assert [p.name for p in tmp_path.iterdir()] == ["o.jsonl"]
 
 
-def test_headless_failure_before_any_record_leaves_target_alone(tmp_path, fake_collector):
+def test_headless_failure_before_any_record_leaves_target_alone(
+    tmp_path, fake_collector
+):
     out = tmp_path / "o.jsonl"
     out.write_text("OLD\n", encoding="utf-8")
 
@@ -369,13 +424,17 @@ def test_headless_zero_records_keeps_existing_target(tmp_path, fake_collector):
 def test_headless_stream_is_opened_before_detect(tmp_path, monkeypatch, fake_collector):
     order = []
     real_open = gso.export.open_stream
-    monkeypatch.setattr(gso.export, "open_stream", lambda p: (order.append("open"), real_open(p))[1])
+    monkeypatch.setattr(
+        gso.export, "open_stream", lambda p: (order.append("open"), real_open(p))[1]
+    )
     monkeypatch.setattr(cli, "detect", lambda **kw: (order.append("detect"), caps())[1])
     run_main([*HEADLESS, str(tmp_path / "o.jsonl")])
     assert order == ["open", "detect"]
 
 
-def test_headless_ctrl_c_during_detect_exits_130(tmp_path, monkeypatch, fake_collector, capsys):
+def test_headless_ctrl_c_during_detect_exits_130(
+    tmp_path, monkeypatch, fake_collector, capsys
+):
     def interrupted(**kw):
         raise KeyboardInterrupt
 
@@ -389,8 +448,10 @@ def test_headless_ctrl_c_during_detect_exits_130(tmp_path, monkeypatch, fake_col
     assert fake_collector.made == []
 
 
-@pytest.mark.skipif(hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
-                    reason="root ignores directory permissions")
+@pytest.mark.skipif(
+    hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
+    reason="root ignores directory permissions",
+)
 def test_unwritable_parent_directory_rejected(tmp_path, fake_collector):
     d = tmp_path / "ro"
     d.mkdir()
@@ -422,8 +483,14 @@ class FlakyStream(gso.export.JsonlStream):
         return out
 
 
-def test_headless_interrupt_inside_drain_writes_each_record_once(tmp_path, monkeypatch, fake_collector):
-    FlakyStream.fail_at, FlakyStream.exc, FlakyStream.always = 3, KeyboardInterrupt(), False
+def test_headless_interrupt_inside_drain_writes_each_record_once(
+    tmp_path, monkeypatch, fake_collector
+):
+    FlakyStream.fail_at, FlakyStream.exc, FlakyStream.always = (
+        3,
+        KeyboardInterrupt(),
+        False,
+    )
     monkeypatch.setattr(gso.export, "open_stream", FlakyStream)
     fake_collector.records_on_start = [mk(i, f"r{i}") for i in range(8)]
     out = tmp_path / "o.jsonl"
@@ -432,7 +499,9 @@ def test_headless_interrupt_inside_drain_writes_each_record_once(tmp_path, monke
     assert [r.metric for r in read_jsonl(out)] == [f"r{i}" for i in range(8)]
 
 
-def test_headless_io_error_exits_3_and_keeps_partial(tmp_path, monkeypatch, fake_collector, capsys):
+def test_headless_io_error_exits_3_and_keeps_partial(
+    tmp_path, monkeypatch, fake_collector, capsys
+):
     FlakyStream.fail_at = 3
     FlakyStream.exc = OSError(28, "No space left on device")
     FlakyStream.always = True
@@ -448,7 +517,9 @@ def test_headless_io_error_exits_3_and_keeps_partial(tmp_path, monkeypatch, fake
     assert [r.metric for r in read_jsonl(partial)] == ["r0", "r1"]
     err = capsys.readouterr().err.splitlines()
     assert "wrote 2 records" in err[0] and str(partial) in err[0]
-    assert any("No space left on device" in ln and "o.jsonl.partial" in ln for ln in err)
+    assert any(
+        "No space left on device" in ln and "o.jsonl.partial" in ln for ln in err
+    )
 
 
 def test_live_help_documents_exit_codes(capsys):

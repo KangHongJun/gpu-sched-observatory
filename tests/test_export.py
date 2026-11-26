@@ -18,18 +18,47 @@ from gso.export import (
 from gso.record import Quality, Record, Scope, unsupported
 
 
-def rec(ts=1, metric="gpu.util", value=50.0, unit="%", pid=None, ctx=None, stream=None,
-        quality=Quality.MEASURED, scope=Scope.DEVICE):
-    return Record(ts, "GPU-test-0001", metric, value, unit, "nvml", scope, quality,
-                  pid=pid, context_id=ctx, stream_id=stream)
+def rec(
+    ts=1,
+    metric="gpu.util",
+    value=50.0,
+    unit="%",
+    pid=None,
+    ctx=None,
+    stream=None,
+    quality=Quality.MEASURED,
+    scope=Scope.DEVICE,
+):
+    return Record(
+        ts,
+        "GPU-test-0001",
+        metric,
+        value,
+        unit,
+        "nvml",
+        scope,
+        quality,
+        pid=pid,
+        context_id=ctx,
+        stream_id=stream,
+    )
 
 
 SAMPLE = [
     rec(1, value=12.5),
     rec(1, "proc.mem_used", 1024.0, "MiB", pid=42, scope=Scope.PROCESS),
     unsupported(2, "GPU-test-0001", "dcgm.sm_active", "%", "dcgm", Scope.DEVICE),
-    rec(3, "k.dur", 7.0, "us", pid=1, ctx=2, stream=3, quality=Quality.ESTIMATED,
-        scope=Scope.CONTEXT),
+    rec(
+        3,
+        "k.dur",
+        7.0,
+        "us",
+        pid=1,
+        ctx=2,
+        stream=3,
+        quality=Quality.ESTIMATED,
+        scope=Scope.CONTEXT,
+    ),
 ]
 
 
@@ -43,14 +72,29 @@ def test_jsonl_round_trip(tmp_path):
     assert write_jsonl(SAMPLE, p) == len(SAMPLE)
     assert read_jsonl(p) == SAMPLE
     text = p.read_text(encoding="utf-8")
-    assert text.endswith("\n") and "\r" not in text and len(text.splitlines()) == len(SAMPLE)
+    assert (
+        text.endswith("\n")
+        and "\r" not in text
+        and len(text.splitlines()) == len(SAMPLE)
+    )
 
 
 def test_csv_header_order(tmp_path):
     p = tmp_path / "o.csv"
     write_csv(SAMPLE, p)
-    assert CSV_COLUMNS == ("ts_ns", "gpu_uuid", "pid", "context_id", "stream_id", "metric",
-                           "value", "unit", "source", "scope", "quality")
+    assert CSV_COLUMNS == (
+        "ts_ns",
+        "gpu_uuid",
+        "pid",
+        "context_id",
+        "stream_id",
+        "metric",
+        "value",
+        "unit",
+        "source",
+        "scope",
+        "quality",
+    )
     assert p.read_text(encoding="utf-8").splitlines()[0] == ",".join(CSV_COLUMNS)
 
 
@@ -134,6 +178,7 @@ def test_read_jsonl_skips_blank_lines(tmp_path):
 
 
 # -- streaming ---------------------------------------------------------------
+
 
 def test_streams_append_and_flush(tmp_path):
     j, c = tmp_path / "s.jsonl", tmp_path / "s.csv"
@@ -239,7 +284,15 @@ def test_drain_cursor_exactly_once_with_shared_timestamps():
     d = Drainer(buf, sink)
     expected = []
     seq = 0
-    for batch_ts in (10, 10, 10, 11, 11, 10, 12):  # repeated and even out-of-order timestamps
+    for batch_ts in (
+        10,
+        10,
+        10,
+        11,
+        11,
+        10,
+        12,
+    ):  # repeated and even out-of-order timestamps
         for _ in range(3):
             r = rec(batch_ts, metric=f"m{seq}")
             seq += 1
@@ -289,7 +342,9 @@ def test_drain_reports_dropped_records():
     assert [r.metric for r in sink.items] == ["m0", "m1", "m2", "n5", "n6", "n7", "n8"]
 
 
-@pytest.mark.parametrize("exc", [KeyboardInterrupt(), OSError(28, "No space left on device")])
+@pytest.mark.parametrize(
+    "exc", [KeyboardInterrupt(), OSError(28, "No space left on device")]
+)
 def test_drain_interrupted_mid_write_is_exactly_once(exc):
     buf = RingBuffer(100)
     sink = ListSink(fail_at=4, exc=exc)

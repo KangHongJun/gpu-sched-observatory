@@ -83,5 +83,7 @@ async def test_f5_not_wrapped_at_120_columns_and_scrollable(tmp_path):
         w = app.query_one("#compare-text")
         view = app.query_one("#compare-view")
         assert w.size.width >= longest  # rows are not wrapped to the terminal width
-        assert w.size.height <= len(report.view_text(d).splitlines()) + 1  # one per line
+        assert (
+            w.size.height <= len(report.view_text(d).splitlines()) + 1
+        )  # one per line
         assert view.max_scroll_x > 0  # the rest is reachable horizontally

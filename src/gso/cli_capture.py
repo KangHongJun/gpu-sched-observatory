@@ -65,15 +65,32 @@ def add_parser(sub) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_EPILOG,
     )
-    p.add_argument("--gpu", type=int, required=True, help="GPU index the report is about")
-    p.add_argument("--duration", type=_duration, default=MAX_DURATION_S,
-                   help=f"capture length in seconds, {MIN_DURATION_S}..{MAX_DURATION_S} "
-                        f"(default {MAX_DURATION_S})")
-    p.add_argument("--out", metavar="DIR", required=True, help="output directory (created if missing)")
-    p.add_argument("--end-target", action="store_true",
-                   help="end the launched command when the capture ends (needs a command after '--')")
-    p.add_argument("--keep-rep", action="store_true",
-                   help="keep capture.nsys-rep (deleted by default)")
+    p.add_argument(
+        "--gpu", type=int, required=True, help="GPU index the report is about"
+    )
+    p.add_argument(
+        "--duration",
+        type=_duration,
+        default=MAX_DURATION_S,
+        help=f"capture length in seconds, {MIN_DURATION_S}..{MAX_DURATION_S} "
+        f"(default {MAX_DURATION_S})",
+    )
+    p.add_argument(
+        "--out",
+        metavar="DIR",
+        required=True,
+        help="output directory (created if missing)",
+    )
+    p.add_argument(
+        "--end-target",
+        action="store_true",
+        help="end the launched command when the capture ends (needs a command after '--')",
+    )
+    p.add_argument(
+        "--keep-rep",
+        action="store_true",
+        help="keep capture.nsys-rep (deleted by default)",
+    )
 
 
 def validate(parser: argparse.ArgumentParser, args, target: list[str] | None) -> None:
@@ -137,16 +154,22 @@ def format_summary_lines(s: dict) -> list[str]:
     elif rate is None:
         rate_line = f"context switch rate: {NA}"
     elif ctx["switch_rate_is_lower_bound"]:
-        rate_line = f"context switch rate: ≥ {rate:.1f} /s (lower bound: masked rows present)"
+        rate_line = (
+            f"context switch rate: ≥ {rate:.1f} /s (lower bound: masked rows present)"
+        )
     else:
         rate_line = f"context switch rate: {rate:.1f} /s"
     win = s["window_s"]
     lines = [
-        (f"GPU {s['gpu']}, mode {s['mode']}, window {NA if win is None else f'{win:.2f} s'}, "
-         f"masked: {'yes' if s['masked'] else 'no'} (on-demand capture)"),
+        (
+            f"GPU {s['gpu']}, mode {s['mode']}, window {NA if win is None else f'{win:.2f} s'}, "
+            f"masked: {'yes' if s['masked'] else 'no'} (on-demand capture)"
+        ),
         rate_line,
     ]
-    if not launched:  # in launched mode the shares are not meaningful here; they stay in the file
+    if (
+        not launched
+    ):  # in launched mode the shares are not meaningful here; they stay in the file
         for pc in ctx["per_context"]:
             r = pc["restores_per_s"]
             lines.append(
@@ -159,11 +182,17 @@ def format_summary_lines(s: dict) -> list[str]:
     if s["mode"] == "global":
         lines.append("kernels: N/A (global capture records no kernels)")
     elif k["count"] is None:
-        why = " (kernels could not be mapped to this GPU, see notes)" if unmapped else ""
+        why = (
+            " (kernels could not be mapped to this GPU, see notes)" if unmapped else ""
+        )
         lines.append(f"kernels: {NA}{why}")
     else:
         lower = "≥ " if unmapped else ""
-        why = " (some kernels could not be mapped to this GPU, see notes)" if unmapped else ""
+        why = (
+            " (some kernels could not be mapped to this GPU, see notes)"
+            if unmapped
+            else ""
+        )
         lines.append(
             f"kernels: {lower}{k['count']}, duration p50 {_ms(k['duration_ms']['p50_ms'])}{why}"
         )
@@ -219,8 +248,10 @@ def run_capture(args) -> int:
         print(f"gso: {line}", file=err)
     out = Path(args.out)
     try:
-        write_atomic(out / "summary.json",
-                     json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+        write_atomic(
+            out / "summary.json",
+            json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+        )
         write_atomic(out / "timeline.txt", timeline)
     except OSError as e:
         print(f"gso: I/O error writing the report: {e}", file=err)
@@ -230,6 +261,9 @@ def run_capture(args) -> int:
         paths.append(res.rep_path)
     print("gso: wrote " + ", ".join(str(p) for p in paths), file=err)
     if res.mode == "launched" and not res.target_terminated:
-        print("gso: the launched command was not ended by this capture and may still be "
-              "running; it ends on its own", file=err)
+        print(
+            "gso: the launched command was not ended by this capture and may still be "
+            "running; it ends on its own",
+            file=err,
+        )
     return 0

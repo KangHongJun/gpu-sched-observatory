@@ -60,7 +60,9 @@ def parse_progress(lines) -> list[dict[str, str]]:
     return blocks
 
 
-def block_point(t: float, block: dict[str, str]) -> tuple[float, int, int | None] | None:
+def block_point(
+    t: float, block: dict[str, str]
+) -> tuple[float, int, int | None] | None:
     """진행 블록 하나를 (벽시계 s, 누적 프레임, 누적 drop_frames 또는 None)으로."""
     if not block.get("frame", "").isdigit():
         return None
@@ -68,7 +70,9 @@ def block_point(t: float, block: dict[str, str]) -> tuple[float, int, int | None
     return (t, int(block["frame"]), int(drop) if drop.isdigit() else None)
 
 
-def window_start(points: list[tuple[float, int, int | None]], warmup_s: float) -> int | None:
+def window_start(
+    points: list[tuple[float, int, int | None]], warmup_s: float
+) -> int | None:
     """첫 샘플 시각 + warmup_s 이후의 첫 샘플 인덱스. 아직 없으면 None."""
     if not points:
         return None
@@ -114,7 +118,10 @@ BARRIER_TOL_S = 1.0  # 진행 샘플 간격(0.5 s)의 두 배
 
 
 def gate_start(
-    walls: list[float], warm_i: int | None, start_at: float | None, tol_s: float = BARRIER_TOL_S
+    walls: list[float],
+    warm_i: int | None,
+    start_at: float | None,
+    tol_s: float = BARRIER_TOL_S,
 ) -> int | None:
     """--start-at 장벽을 반영한 측정 창 시작 인덱스. 아직 정할 수 없으면 None.
 
@@ -161,10 +168,28 @@ def window_metrics(points: list[tuple[float, int, int | None]], i0: int) -> dict
 
 def ffmpeg_cmd(video: Path) -> list[str]:
     return [
-        "ffmpeg", "-nostdin", "-v", "error", "-nostats", "-progress", "pipe:1",
-        "-stream_loop", "-1",
-        "-hwaccel", "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda",
-        "-c:v", "h264_cuvid", "-i", str(video), "-f", "null", "-",
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-nostats",
+        "-progress",
+        "pipe:1",
+        "-stream_loop",
+        "-1",
+        "-hwaccel",
+        "cuda",
+        "-hwaccel_device",
+        "0",
+        "-hwaccel_output_format",
+        "cuda",
+        "-c:v",
+        "h264_cuvid",
+        "-i",
+        str(video),
+        "-f",
+        "null",
+        "-",
     ]
 
 
@@ -173,16 +198,33 @@ def ensure_video(stop: StopFlag, cache_dir: Path = CACHE_DIR) -> Path:
     if path.exists():
         return path
     note = lambda: print(
-        "decode: waiting for another process to generate the test video", file=sys.stderr
+        "decode: waiting for another process to generate the test video",
+        file=sys.stderr,
     )
     with file_lock(cache_dir / f"{VIDEO_PARAMS}.lock", stop, note):
         if path.exists():
             return path
         tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp.mp4")
         cmd = [
-            "ffmpeg", "-nostdin", "-v", "error", "-y",
-            "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30", "-t", "20",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-g", "60",
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1920x1080:rate=30",
+            "-t",
+            "20",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "veryfast",
+            "-g",
+            "60",
             str(tmp),
         ]
         try:
@@ -191,7 +233,9 @@ def ensure_video(stop: StopFlag, cache_dir: Path = CACHE_DIR) -> Path:
             except FileNotFoundError as exc:
                 raise WorkloadUnavailable("ffmpeg not found") from exc
             if r.returncode != 0:
-                raise WorkloadUnavailable(f"cannot generate test video: {_last_line(r.stderr)}")
+                raise WorkloadUnavailable(
+                    f"cannot generate test video: {_last_line(r.stderr)}"
+                )
             os.replace(tmp, path)
         finally:
             tmp.unlink(missing_ok=True)
@@ -236,7 +280,9 @@ def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
     try:
         q, err_lines = _start_readers(proc)
         start = _now()
-        deadline = progress_deadline_s(ctx.clock(), ctx.start_at, args.duration)  # 진행 샘플이 오지 않을 때의 상한
+        deadline = progress_deadline_s(
+            ctx.clock(), ctx.start_at, args.duration
+        )  # 진행 샘플이 오지 않을 때의 상한
         pending: list[str] = []
         points: list[tuple[float, int, int | None]] = []
         walls: list[float] = []  # points[i]가 도착한 벽시계 시각(epoch s)
@@ -253,7 +299,9 @@ def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
                 continue
             if line is None:
                 msg = _last_line("".join(err_lines))
-                raise WorkloadUnavailable(f"ffmpeg h264_cuvid failed (exit {proc.wait()}): {msg}")
+                raise WorkloadUnavailable(
+                    f"ffmpeg h264_cuvid failed (exit {proc.wait()}): {msg}"
+                )
             pending.append(line)
             if not line.startswith("progress="):
                 continue
@@ -280,7 +328,11 @@ def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
 
 def main(argv: list[str] | None = None) -> int:
     return run_cli(
-        "decode", "ffmpeg h264_cuvid hardware decode workload", lambda p: None, measure, argv
+        "decode",
+        "ffmpeg h264_cuvid hardware decode workload",
+        lambda p: None,
+        measure,
+        argv,
     )
 
 

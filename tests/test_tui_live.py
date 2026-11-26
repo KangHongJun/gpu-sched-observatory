@@ -9,7 +9,14 @@ from gso.tui.app import GsoApp
 
 NOW = 1_000_000_000_000
 UUID = "GPU-test-0001"
-BAR_IDS = ["gr-engine", "sm-active", "sm-occupancy", "tensor-active", "dram-active", "nvdec"]
+BAR_IDS = [
+    "gr-engine",
+    "sm-active",
+    "sm-occupancy",
+    "tensor-active",
+    "dram-active",
+    "nvdec",
+]
 
 
 def caps(dcgm_ok=False, reason="host engine not running", mps=False):
@@ -32,9 +39,15 @@ def put(buf, metric, value, ts=NOW, pid=None, scope=None, quality=Quality.MEASUR
 def full_buffer(ts=NOW):
     buf = RingBuffer(10_000)
     for m, v in [
-        ("gpu.util", 37.0), ("gpu.temp", 64.0), ("gpu.power", 178.0), ("gpu.dec_util", 84.0),
-        ("dcgm.gr_engine_active", 90.0), ("dcgm.sm_active", 78.0),
-        ("dcgm.sm_occupancy", 42.0), ("dcgm.tensor_active", 32.0), ("dcgm.dram_active", 67.0),
+        ("gpu.util", 37.0),
+        ("gpu.temp", 64.0),
+        ("gpu.power", 178.0),
+        ("gpu.dec_util", 84.0),
+        ("dcgm.gr_engine_active", 90.0),
+        ("dcgm.sm_active", 78.0),
+        ("dcgm.sm_occupancy", 42.0),
+        ("dcgm.tensor_active", 32.0),
+        ("dcgm.dram_active", 67.0),
     ]:
         put(buf, m, v, ts)
     return buf
@@ -102,7 +115,9 @@ async def test_measured_values_and_header():
         h = text(app, "header")
         assert h.startswith("GPU 1 | Test GPU 9000 |")
         assert "64 C" in h and "178 W" in h and "MPS OFF" in h
-        assert "F2 Metrics | F3 Timeline | F4 Capture | F5 Compare" in text(app, "footer")
+        assert "F2 Metrics | F3 Timeline | F4 Capture | F5 Compare" in text(
+            app, "footer"
+        )
 
 
 async def test_empty_buffer_is_all_na_and_no_zero_percent():
@@ -135,7 +150,9 @@ async def test_process_table_rows():
     add_procs(buf)
 
     class C:
-        status = CollectorStatus(gpu_name="Test GPU 9000", process_names={1420: "decoder"})
+        status = CollectorStatus(
+            gpu_name="Test GPU 9000", process_names={1420: "decoder"}
+        )
         started = stopped = 0
 
         def start(self):
@@ -151,7 +168,12 @@ async def test_process_table_rows():
         for col in ("PID", "PROCESS", "SM UTIL", "VRAM", "CTX SW/s"):
             assert col in t
         rows = t.splitlines()[1:]
-        assert rows[0].split()[:4] == ["1421", "?", "62%", "512M"]  # sorted by SM util desc
+        assert rows[0].split()[:4] == [
+            "1421",
+            "?",
+            "62%",
+            "512M",
+        ]  # sorted by SM util desc
         assert rows[1].split()[:4] == ["1420", "decoder", "8%", "2.4G"]
         assert all(r.rstrip().endswith("N/A") and "N/A (MPS)" not in r for r in rows)
 

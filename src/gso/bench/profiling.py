@@ -23,11 +23,25 @@ def default_profiler(caps: Capabilities):
                 res = capture(MAX_DURATION_S, Path(d), caps, name="capture")
                 if mps:
                     return {"ctx_switch_rate": None, "note": MPS_NOTE, "error": None}
-                summary = build_summary(res.sqlite_path, gpu=gpu, mode="global", masked=res.masked)
+                summary = build_summary(
+                    res.sqlite_path, gpu=gpu, mode="global", masked=res.masked
+                )
             except (CaptureError, ValueError, OSError) as e:
-                return {"ctx_switch_rate": None, "note": None, "error": f"{type(e).__name__}: {e}"}
+                return {
+                    "ctx_switch_rate": None,
+                    "note": None,
+                    "error": f"{type(e).__name__}: {e}",
+                }
         ctx = summary["ctx"]
-        note = "lower bound: masked rows present" if ctx["switch_rate_is_lower_bound"] else None
-        return {"ctx_switch_rate": ctx["switch_rate_per_s"], "note": note, "error": None}
+        note = (
+            "lower bound: masked rows present"
+            if ctx["switch_rate_is_lower_bound"]
+            else None
+        )
+        return {
+            "ctx_switch_rate": ctx["switch_rate_per_s"],
+            "note": note,
+            "error": None,
+        }
 
     return run

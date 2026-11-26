@@ -50,17 +50,37 @@ def touch_outputs(out_dir, name="capture", rep=True, sqlite=True):
 # --- build_command / build_export_command --------------------------------
 def test_build_command_global_exact():
     assert build_command(NSYS, 10, Path("/o/c")) == [
-        NSYS, "profile", "--gpuctxsw=true", "--sample=none", "--cpuctxsw=none",
-        "--duration=10", "--force-overwrite=true", "-o", "/o/c", "sleep", "10",
+        NSYS,
+        "profile",
+        "--gpuctxsw=true",
+        "--sample=none",
+        "--cpuctxsw=none",
+        "--duration=10",
+        "--force-overwrite=true",
+        "-o",
+        "/o/c",
+        "sleep",
+        "10",
     ]
 
 
 def test_build_command_launched_exact():
     argv = build_command(NSYS, 5, Path("/o/c"), target=["python", "-m", "w"])
     assert argv == [
-        NSYS, "profile", "--gpuctxsw=true", "--sample=none", "--cpuctxsw=none",
-        "--trace=cuda", "--kill=none", "--duration=5", "--force-overwrite=true", "-o", "/o/c",
-        "python", "-m", "w",
+        NSYS,
+        "profile",
+        "--gpuctxsw=true",
+        "--sample=none",
+        "--cpuctxsw=none",
+        "--trace=cuda",
+        "--kill=none",
+        "--duration=5",
+        "--force-overwrite=true",
+        "-o",
+        "/o/c",
+        "python",
+        "-m",
+        "w",
     ]
 
 
@@ -71,8 +91,17 @@ def test_build_command_launched_end_target_kills_with_sigterm():
 
 def test_build_command_global_unchanged_and_end_target_rejected():
     assert build_command(NSYS, 10, Path("/o/c")) == [
-        NSYS, "profile", "--gpuctxsw=true", "--sample=none", "--cpuctxsw=none",
-        "--duration=10", "--force-overwrite=true", "-o", "/o/c", "sleep", "10",
+        NSYS,
+        "profile",
+        "--gpuctxsw=true",
+        "--sample=none",
+        "--cpuctxsw=none",
+        "--duration=10",
+        "--force-overwrite=true",
+        "-o",
+        "/o/c",
+        "sleep",
+        "10",
     ]
     with pytest.raises(ValueError):
         build_command(NSYS, 5, Path("/o/c"), end_target=True)
@@ -99,8 +128,13 @@ def test_build_command_rejects_empty_target():
 
 def test_build_export_command_exact():
     assert build_export_command(NSYS, Path("/o/c.nsys-rep"), Path("/o/c.sqlite")) == [
-        NSYS, "export", "--type=sqlite", "--force-overwrite=true",
-        "-o", "/o/c.sqlite", "/o/c.nsys-rep",
+        NSYS,
+        "export",
+        "--type=sqlite",
+        "--force-overwrite=true",
+        "-o",
+        "/o/c.sqlite",
+        "/o/c.nsys-rep",
     ]
 
 
@@ -274,12 +308,18 @@ def alive(pid):
 
 def test_group_runner_kills_only_its_own_tree_on_timeout(tmp_path):
     pidfile = tmp_path / "pids"
-    sentinel = subprocess.Popen(["sleep", "30"])  # 같은 부모, 다른 그룹: 건드리면 안 된다
+    sentinel = subprocess.Popen(
+        ["sleep", "30"]
+    )  # 같은 부모, 다른 그룹: 건드리면 안 된다
     try:
         script = f"echo $$ > {pidfile}; sleep 30 & echo $! >> {pidfile}; wait"
         with pytest.raises(subprocess.TimeoutExpired):
             nsys_capture._run_in_group(
-                ["sh", "-c", script], capture_output=True, text=True, timeout=0.5, env=None
+                ["sh", "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+                env=None,
             )
         pids = [int(x) for x in pidfile.read_text().split()]
         assert len(pids) == 2
@@ -296,7 +336,10 @@ def test_group_runner_kills_only_its_own_tree_on_timeout(tmp_path):
 def test_group_runner_returns_completed_process():
     r = nsys_capture._run_in_group(
         ["sh", "-c", "echo out; echo err >&2; exit 4"],
-        capture_output=True, text=True, timeout=5, env=None,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env=None,
     )
     assert (r.returncode, r.stdout.strip(), r.stderr.strip()) == (4, "out", "err")
 
@@ -319,8 +362,13 @@ def run143(tmp_path, rep_bytes=b"rep", rc=143):
 
 def cap143(tmp_path, run, *, end_target=True, target=("w",), times=(0.0, 6.0, 7.0)):
     return capture(
-        5, tmp_path, caps(root=True), run=run, name="l",
-        target=list(target) if target else None, end_target=end_target,
+        5,
+        tmp_path,
+        caps(root=True),
+        run=run,
+        name="l",
+        target=list(target) if target else None,
+        end_target=end_target,
         monotonic=clock(*times),
     )
 
@@ -359,7 +407,9 @@ def test_137_is_error_even_with_end_target(tmp_path):
 
 
 def test_zero_exit_with_zero_byte_report_is_error(tmp_path):
-    run = fake_run(on_call=lambda argv, i: (tmp_path / "capture.nsys-rep").write_bytes(b""))
+    run = fake_run(
+        on_call=lambda argv, i: (tmp_path / "capture.nsys-rep").write_bytes(b"")
+    )
     with pytest.raises(CaptureError, match="nsys-rep"):
         capture(5, tmp_path, caps(), run=run)
     assert list(tmp_path.iterdir()) == []
@@ -404,7 +454,9 @@ def test_stale_report_is_not_mistaken_for_new_output(tmp_path):
 
 
 # --- default runner: survivors and pipes ----------------------------------
-def test_default_runner_does_not_wait_for_or_signal_surviving_background_process(tmp_path):
+def test_default_runner_does_not_wait_for_or_signal_surviving_background_process(
+    tmp_path,
+):
     pidfile = tmp_path / "pid"
     script = f"sleep 30 & echo $! > {pidfile}; echo started"
     t0 = time.monotonic()

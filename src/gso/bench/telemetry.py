@@ -31,10 +31,15 @@ MEAN_KEYS = {
 _CAPACITY = 200_000
 
 
-def mean_in_window(records: Sequence[Record], metric: str, start_ns: int, end_ns: int) -> float | None:
+def mean_in_window(
+    records: Sequence[Record], metric: str, start_ns: int, end_ns: int
+) -> float | None:
     vals = [
-        r.value for r in records
-        if r.metric == metric and r.value is not None and r.quality is Quality.MEASURED
+        r.value
+        for r in records
+        if r.metric == metric
+        and r.value is not None
+        and r.quality is Quality.MEASURED
         and start_ns <= r.ts_ns <= end_ns
     ]
     return sum(vals) / len(vals) if vals else None
@@ -70,7 +75,9 @@ class NvmlDcgmTelemetry:
         self._handle = None
         self._inited = False
         self._own: Callable[[int], bool] | None = None
-        self._foreign: list[tuple[int, frozenset[int]]] = []  # (ts_ns, pids): in memory only
+        self._foreign: list[
+            tuple[int, frozenset[int]]
+        ] = []  # (ts_ns, pids): in memory only
         self._info = {"power_limit_w": None, "perf_state": None}
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -84,12 +91,19 @@ class NvmlDcgmTelemetry:
             self.errors.append(f"NVML unavailable: {e}")
             return
         self._open_extras()
-        self._thread = threading.Thread(target=self._loop, name="gso-bench-nvml", daemon=True)
+        self._thread = threading.Thread(
+            target=self._loop, name="gso-bench-nvml", daemon=True
+        )
         self._thread.start()
         if any(self._fields.values()):
             self._dcgm = DcgmProvider(
-                self._dcgm_index, f"gpu-{self.gpu_index}", self._buffer, self._fields,
-                interval_ms=1000, dcgmi_cmd=self._dcgmi_cmd, popen=self._popen,
+                self._dcgm_index,
+                f"gpu-{self.gpu_index}",
+                self._buffer,
+                self._fields,
+                interval_ms=1000,
+                dcgmi_cmd=self._dcgmi_cmd,
+                popen=self._popen,
                 clock_ns=self._clock_ns,
             )
             self._dcgm.start()
@@ -108,9 +122,13 @@ class NvmlDcgmTelemetry:
             self.errors.append(f"NVML extras unavailable: {e}")
             return
         with contextlib.suppress(Exception):  # unsupported: stays None
-            self._info["power_limit_w"] = mod.nvmlDeviceGetEnforcedPowerLimit(self._handle) / 1000
+            self._info["power_limit_w"] = (
+                mod.nvmlDeviceGetEnforcedPowerLimit(self._handle) / 1000
+            )
         with contextlib.suppress(Exception):
-            self._info["perf_state"] = f"P{int(mod.nvmlDeviceGetPerformanceState(self._handle))}"
+            self._info["perf_state"] = (
+                f"P{int(mod.nvmlDeviceGetPerformanceState(self._handle))}"
+            )
 
     def static_info(self) -> dict:
         """Power limit (W) and performance state at the start, None when NVML cannot say."""
@@ -128,15 +146,30 @@ class NvmlDcgmTelemetry:
             return
         with contextlib.suppress(Exception):  # unsupported: no samples, mean None
             clk = float(mod.nvmlDeviceGetClockInfo(h, getattr(mod, "NVML_CLOCK_SM", 1)))
-            self._buffer.push(Record(ts, "", "gpu.sm_clock", clk, "MHz", "nvml", Scope.DEVICE,
-                                     Quality.MEASURED))
+            self._buffer.push(
+                Record(
+                    ts,
+                    "",
+                    "gpu.sm_clock",
+                    clk,
+                    "MHz",
+                    "nvml",
+                    Scope.DEVICE,
+                    Quality.MEASURED,
+                )
+            )
         own = self._own
         if own is None:
             return
         try:
-            pids = {p.pid for fn in (mod.nvmlDeviceGetComputeRunningProcesses,
-                                     mod.nvmlDeviceGetMPSComputeRunningProcesses)
-                    for p in fn(h)}
+            pids = {
+                p.pid
+                for fn in (
+                    mod.nvmlDeviceGetComputeRunningProcesses,
+                    mod.nvmlDeviceGetMPSComputeRunningProcesses,
+                )
+                for p in fn(h)
+            }
         except Exception as e:  # noqa: BLE001
             if len(self.errors) < 5:
                 self.errors.append(f"NVML process listing failed: {e}")
@@ -190,11 +223,17 @@ class NvmlDcgmTelemetry:
     def probe(self) -> tuple[float | None, float | None]:
         """(temperature C, utilization %) right now, None for what cannot be read."""
         try:
-            recs = {r.metric: r.value for r in self._probe.sample(self._clock_ns()) if r.scope.value == "device"}
+            recs = {
+                r.metric: r.value
+                for r in self._probe.sample(self._clock_ns())
+                if r.scope.value == "device"
+            }
         except Exception:  # noqa: BLE001
             return None, None
         return recs.get("gpu.temp"), recs.get("gpu.util")
 
     def window_means(self, start_ns: int, end_ns: int) -> dict[str, float | None]:
         recs = self._buffer.snapshot()
-        return {k: mean_in_window(recs, m, start_ns, end_ns) for k, m in MEAN_KEYS.items()}
+        return {
+            k: mean_in_window(recs, m, start_ns, end_ns) for k, m in MEAN_KEYS.items()
+        }

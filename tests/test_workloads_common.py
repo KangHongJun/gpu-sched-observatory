@@ -74,8 +74,13 @@ def test_run_cli_interrupted_writes_nothing(tmp_path, monkeypatch):
         stop.set()
 
     monkeypatch.setattr(_common, "select_gpu", lambda n: None)
-    rc = _common.run_cli("x", "d", add_args, measure,
-                         ["--gpu", "0", "--duration", "1", "--out", str(out)])
+    rc = _common.run_cli(
+        "x",
+        "d",
+        add_args,
+        measure,
+        ["--gpu", "0", "--duration", "1", "--out", str(out)],
+    )
     assert rc != 0
     assert list(tmp_path.iterdir()) == []
 
@@ -87,8 +92,13 @@ def test_run_cli_unavailable_exits_nonzero_one_line(tmp_path, monkeypatch, capsy
         raise _common.WorkloadUnavailable("no thing")
 
     monkeypatch.setattr(_common, "select_gpu", lambda n: None)
-    rc = _common.run_cli("x", "d", lambda p: None, measure,
-                         ["--gpu", "0", "--duration", "1", "--out", str(out)])
+    rc = _common.run_cli(
+        "x",
+        "d",
+        lambda p: None,
+        measure,
+        ["--gpu", "0", "--duration", "1", "--out", str(out)],
+    )
     assert rc == 1
     err = capsys.readouterr().err.strip()
     assert "no thing" in err and "\n" not in err
@@ -98,9 +108,13 @@ def test_run_cli_unavailable_exits_nonzero_one_line(tmp_path, monkeypatch, capsy
 def test_run_cli_success_writes_summary_and_extra(tmp_path, monkeypatch):
     out = tmp_path / "o.json"
     monkeypatch.setattr(_common, "select_gpu", lambda n: None)
-    rc = _common.run_cli("x", "d", lambda p: None,
-                         lambda a, s: ([1.0, 2.0], 2.0, {"gbps": 3.0}),
-                         ["--gpu", "0", "--duration", "1", "--out", str(out)])
+    rc = _common.run_cli(
+        "x",
+        "d",
+        lambda p: None,
+        lambda a, s: ([1.0, 2.0], 2.0, {"gbps": 3.0}),
+        ["--gpu", "0", "--duration", "1", "--out", str(out)],
+    )
     assert rc == 0
     data = json.loads(out.read_text())
     assert data["workload"] == "x" and data["pid"] == os.getpid()
@@ -111,8 +125,13 @@ def test_run_cli_success_writes_summary_and_extra(tmp_path, monkeypatch):
 def test_run_cli_latency_workloads_declare_metric_kind(tmp_path, monkeypatch):
     out = tmp_path / "o.json"
     monkeypatch.setattr(_common, "select_gpu", lambda n: None)
-    _common.run_cli("x", "d", lambda p: None, lambda a, s: ([1.0], 1.0, {}),
-                    ["--gpu", "0", "--duration", "1", "--out", str(out)])
+    _common.run_cli(
+        "x",
+        "d",
+        lambda p: None,
+        lambda a, s: ([1.0], 1.0, {}),
+        ["--gpu", "0", "--duration", "1", "--out", str(out)],
+    )
     assert json.loads(out.read_text())["metric_kind"] == "latency"
 
 
@@ -120,9 +139,12 @@ def test_run_cli_throughput_only_has_null_latencies(tmp_path, monkeypatch):
     out = tmp_path / "o.json"
     monkeypatch.setattr(_common, "select_gpu", lambda n: None)
     rc = _common.run_cli(
-        "x", "d", lambda p: None,
+        "x",
+        "d",
+        lambda p: None,
         lambda a, s: _common.ThroughputOnly(500, 2.0, {"fps": 250.0}),
-        ["--gpu", "0", "--duration", "1", "--out", str(out)])
+        ["--gpu", "0", "--duration", "1", "--out", str(out)],
+    )
     assert rc == 0
     d = json.loads(out.read_text())
     assert d["metric_kind"] == "throughput_only"
@@ -138,8 +160,13 @@ def test_run_cli_interrupted_exception_exits_130_no_json(tmp_path, monkeypatch):
     def measure(a, s):
         raise _common.Interrupted()
 
-    rc = _common.run_cli("x", "d", lambda p: None, measure,
-                         ["--gpu", "0", "--duration", "1", "--out", str(out)])
+    rc = _common.run_cli(
+        "x",
+        "d",
+        lambda p: None,
+        measure,
+        ["--gpu", "0", "--duration", "1", "--out", str(out)],
+    )
     assert rc == _common.EXIT_INTERRUPTED
     assert list(tmp_path.iterdir()) == []
 

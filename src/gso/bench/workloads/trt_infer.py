@@ -50,8 +50,13 @@ def _export_onnx(path: Path, batch: int) -> None:
     with torch.no_grad(), warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)  # 레거시 exporter 안내
         torch.onnx.export(
-            model, x, str(path), input_names=["input"], output_names=["output"],
-            opset_version=17, dynamo=False,
+            model,
+            x,
+            str(path),
+            input_names=["input"],
+            output_names=["output"],
+            opset_version=17,
+            dynamo=False,
         )
 
 
@@ -120,7 +125,9 @@ def _load_engine(trt, runtime, batch: int, stop: StopFlag):
             engine = runtime.deserialize_cuda_engine(blob)
             if engine is None:
                 plan.unlink(missing_ok=True)
-                raise WorkloadUnavailable("TensorRT engine deserialize failed after rebuild")
+                raise WorkloadUnavailable(
+                    "TensorRT engine deserialize failed after rebuild"
+                )
     build_s = time.perf_counter() - t0 if (built or waited > 0) else 0.0
     return engine, build_s, waited
 
@@ -153,16 +160,23 @@ def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
     if timed is None:
         return None
     extra = {
-        "backend": "tensorrt", "batch": args.batch, "precision": PRECISION,
-        "trt_version": trt.__version__, "build_s": build_s, "build_waited_s": waited_s,
+        "backend": "tensorrt",
+        "batch": args.batch,
+        "precision": PRECISION,
+        "trt_version": trt.__version__,
+        "build_s": build_s,
+        "build_waited_s": waited_s,
     }
     return (*timed, extra)
 
 
 def main(argv: list[str] | None = None) -> int:
     return run_cli(
-        "trt_infer", "TensorRT ResNet-50 FP16 inference workload",
-        lambda p: p.add_argument("--batch", type=int, default=8), measure, argv,
+        "trt_infer",
+        "TensorRT ResNet-50 FP16 inference workload",
+        lambda p: p.add_argument("--batch", type=int, default=8),
+        measure,
+        argv,
     )
 
 

@@ -40,7 +40,9 @@ class FakeRunner:
         self.thread_names.append(threading.current_thread().name)
         self.started.set()
         if self.block:
-            while not (self.release.is_set() or (cancel.is_set() and not self.ignore_cancel)):
+            while not (
+                self.release.is_set() or (cancel.is_set() and not self.ignore_cancel)
+            ):
                 time.sleep(0.01)
             if cancel.is_set() and not self.ignore_cancel:
                 raise CaptureCancelled("capture cancelled")
@@ -52,8 +54,14 @@ class FakeRunner:
 def make(runner, c=None):
     buf = full_buffer()
     add_procs(buf)
-    return GsoApp(buf, c or caps(), 1, clock_ns=lambda: NOW, capture_runner=runner,
-                  capture_duration_s=5)
+    return GsoApp(
+        buf,
+        c or caps(),
+        1,
+        clock_ns=lambda: NOW,
+        capture_runner=runner,
+        capture_duration_s=5,
+    )
 
 
 async def until(pilot, cond, tries=300):
@@ -71,7 +79,9 @@ async def start_capture(app, pilot):
 
 
 def row(app, pid):
-    return next(ln for ln in text(app, "proc-table").splitlines() if ln.startswith(str(pid)))
+    return next(
+        ln for ln in text(app, "proc-table").splitlines() if ln.startswith(str(pid))
+    )
 
 
 async def test_f4_confirm_runs_worker_and_fills_ctx_column():
@@ -83,7 +93,9 @@ async def test_f4_confirm_runs_worker_and_fills_ctx_column():
         await start_capture(app, pilot)
         assert await until(pilot, lambda: "123.5" in text(app, "proc-table"))
         assert r.calls == [(5, 1)]
-        assert r.thread_names[0] != threading.main_thread().name  # worker thread, not the UI
+        assert (
+            r.thread_names[0] != threading.main_thread().name
+        )  # worker thread, not the UI
         assert row(app, 1420).rstrip().endswith("123.5")
         assert row(app, 1421).rstrip().endswith("N/A")
         head = text(app, "proc-table").splitlines()[0]
@@ -98,7 +110,9 @@ async def test_confirm_text_is_honest():
         await pilot.press("f4")
         await settle(pilot)
         t = "\n".join(str(w.content) for w in app.screen.query(Static))
-        assert "on-demand capture" in t and "5 s" in t and "GPU 1" in t and "GLOBAL" in t
+        assert (
+            "on-demand capture" in t and "5 s" in t and "GPU 1" in t and "GLOBAL" in t
+        )
         assert "7 %" in t
         assert "real-time" not in t.lower() and "실시간" not in t
         await pilot.click("#capture-cancel")
@@ -157,7 +171,9 @@ async def test_running_state_f4_ignored_and_dcgm_marked():
 
 
 async def test_unavailable_shows_hint_and_changes_nothing_else():
-    r = FakeRunner(raises=CaptureUnavailable("nsys not found: set the NSYS environment variable"))
+    r = FakeRunner(
+        raises=CaptureUnavailable("nsys not found: set the NSYS environment variable")
+    )
     app = make(r)
     async with app.run_test(size=(120, 35)) as pilot:
         await settle(pilot)
@@ -169,7 +185,9 @@ async def test_unavailable_shows_hint_and_changes_nothing_else():
 
 
 async def test_failed_shows_first_line_only():
-    r = FakeRunner(raises=CaptureError("nsys profile failed (exit code 1):\nsecret second line"))
+    r = FakeRunner(
+        raises=CaptureError("nsys profile failed (exit code 1):\nsecret second line")
+    )
     app = make(r)
     async with app.run_test(size=(120, 35)) as pilot:
         await settle(pilot)
@@ -184,12 +202,17 @@ async def test_f3_before_and_after_capture_and_f2_returns():
         await settle(pilot)
         await pilot.press("f3")
         await settle(pilot)
-        assert "no capture yet" in text(app, "timeline-view") and "F4" in text(app, "timeline-view")
+        assert "no capture yet" in text(app, "timeline-view") and "F4" in text(
+            app, "timeline-view"
+        )
         assert app.query_one("#timeline-view").display
         assert not app.query_one("#metrics-view").display
         await pilot.press("f2")
         await settle(pilot)
-        assert app.query_one("#metrics-view").display and not app.query_one("#timeline-view").display
+        assert (
+            app.query_one("#metrics-view").display
+            and not app.query_one("#timeline-view").display
+        )
         await start_capture(app, pilot)
         assert await until(pilot, lambda: app._capture_report is not None)
         await pilot.press("f3")
@@ -207,7 +230,9 @@ async def test_f5_without_bench_dir_says_na():
         await settle(pilot)
         await pilot.press("f5")
         await settle(pilot)
-        assert "N/A — no benchmark results loaded (--bench-dir DIR)" in text(app, "compare-text")
+        assert "N/A — no benchmark results loaded (--bench-dir DIR)" in text(
+            app, "compare-text"
+        )
 
 
 async def test_exit_during_running_capture_is_bounded():
@@ -234,7 +259,9 @@ async def test_quit_action_waits_for_the_capture_to_end():
         t0 = time.monotonic()
         threading.Timer(0.6, r.release.set).start()
         quit_task = asyncio.create_task(app.action_quit())
-        assert await until(pilot, lambda: "waiting for capture to finish…" in text(app, "status"))
+        assert await until(
+            pilot, lambda: "waiting for capture to finish…" in text(app, "status")
+        )
         assert not quit_task.done()  # still blocked on the capture
         await quit_task
         assert time.monotonic() - t0 >= 0.5  # returned only after the release

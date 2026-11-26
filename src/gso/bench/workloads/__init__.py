@@ -19,5 +19,7 @@ import importlib.util
 # 넣는다(import하지 않고 find_spec으로 확인한다).
 _CANDIDATES = ("small_kernels", "membound", "fp16_matmul", "trt_infer", "decode")
 WORKLOADS = tuple(
-    n for n in _CANDIDATES if n != "trt_infer" or importlib.util.find_spec("tensorrt") is not None
+    n
+    for n in _CANDIDATES
+    if n != "trt_infer" or importlib.util.find_spec("tensorrt") is not None
 )

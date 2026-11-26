@@ -34,8 +34,11 @@ from gso.bench.workloads import WORKLOADS
 from gso.providers.mps import query as _mps_query
 
 CONDITIONS = [  # (name, MPS on, A's thread %, B's thread %)
-    ("mps_off", False, None, None), ("mps_100_100", True, 100, 100),
-    ("mps_50_50", True, 50, 50), ("mps_70_30", True, 70, 30), ("mps_30_70", True, 30, 70),
+    ("mps_off", False, None, None),
+    ("mps_100_100", True, 100, 100),
+    ("mps_50_50", True, 50, 50),
+    ("mps_70_30", True, 70, 30),
+    ("mps_30_70", True, 30, 70),
 ]
 MIN_REPS = 3
 COOLDOWN_MAX_S = 60.0
@@ -45,7 +48,9 @@ MIN_PROFILE_DURATION_S = 20
 PREBUILD_DEADLINE_S = 1800.0
 SERVER_QUERY_AFTER_S = 2.0
 WARM_BASELINE_C = 45.0
-SAFE_RETRY_S = 5.0  # a refusal must persist this long (our own MPS server may still be exiting)
+SAFE_RETRY_S = (
+    5.0  # a refusal must persist this long (our own MPS server may still be exiting)
+)
 
 
 @dataclass
@@ -72,7 +77,9 @@ class Hooks:
     sleep: object = time.sleep
     monotonic: object = time.monotonic
     killpg: object = os.killpg
-    progress: object = field(default=lambda line: print(line, file=sys.stderr, flush=True))
+    progress: object = field(
+        default=lambda line: print(line, file=sys.stderr, flush=True)
+    )
     environ: object | None = None
 
 
@@ -88,12 +95,18 @@ def _iso(t: float) -> str:
     return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds")
 
 
-def _validate(workload_a, workload_b, out, reps, warmup_s, duration_s, profile, budget, names):
+def _validate(
+    workload_a, workload_b, out, reps, warmup_s, duration_s, profile, budget, names
+):
     for w in (workload_a, workload_b):
         if w not in WORKLOADS:
-            raise ValueError(f"unknown workload {w!r}; available: {', '.join(WORKLOADS)}")
+            raise ValueError(
+                f"unknown workload {w!r}; available: {', '.join(WORKLOADS)}"
+            )
     if reps < MIN_REPS:
-        raise ValueError(f"reps must be >= {MIN_REPS} (at least 3 repetitions), got {reps}")
+        raise ValueError(
+            f"reps must be >= {MIN_REPS} (at least 3 repetitions), got {reps}"
+        )
     if not duration_s > 0 or not warmup_s > 0 or not budget > 0:
         raise ValueError("duration, warmup and setup budget must be > 0")
     if profile and duration_s < MIN_PROFILE_DURATION_S:
@@ -101,21 +114,50 @@ def _validate(workload_a, workload_b, out, reps, warmup_s, duration_s, profile, 
     known = [c[0] for c in CONDITIONS]
     bad = [n for n in names if n not in known]
     if bad:
-        raise ValueError(f"unknown condition(s) {', '.join(bad)}; available: {', '.join(known)}")
+        raise ValueError(
+            f"unknown condition(s) {', '.join(bad)}; available: {', '.join(known)}"
+        )
     if (Path(out) / "results.jsonl").exists():
-        raise ValueError(f"{Path(out) / 'results.jsonl'} already exists; use a new --out")
+        raise ValueError(
+            f"{Path(out) / 'results.jsonl'} already exists; use a new --out"
+        )
 
 
 class _Run:
-    def __init__(self, gpu, wa, wb, out, reps, warmup_s, duration_s, profile, launch, names,
-                 a_args, b_args, budget, hooks, env_info, run_id):
+    def __init__(
+        self,
+        gpu,
+        wa,
+        wb,
+        out,
+        reps,
+        warmup_s,
+        duration_s,
+        profile,
+        launch,
+        names,
+        a_args,
+        b_args,
+        budget,
+        hooks,
+        env_info,
+        run_id,
+    ):
         self.gpu, self.wl, self.out = gpu, {"A": wa, "B": wb}, Path(out)
         self.args = {"A": list(a_args), "B": list(b_args)}
-        self.reps, self.warmup_s, self.duration_s, self.profile = reps, warmup_s, duration_s, profile
+        self.reps, self.warmup_s, self.duration_s, self.profile = (
+            reps,
+            warmup_s,
+            duration_s,
+            profile,
+        )
         self.launch, self.budget, self.h = launch, budget, hooks
         self.env_info = dict(env_info or {})
         self.conditions = [c for c in CONDITIONS if c[0] in names]  # canonical order
-        self.run_id = run_id or f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
+        self.run_id = (
+            run_id
+            or f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
+        )
         self.environ = dict(os.environ if hooks.environ is None else hooks.environ)
         self.warnings: list[str] = []
         self.failed: list[dict] = []
@@ -125,7 +167,9 @@ class _Run:
         self.static: dict = {}
         self.launched: set[int] = set()
         self.cur_session = None
-        self.seen_daemon: set[int] = set()  # daemon/server pids of the current MPS condition
+        self.seen_daemon: set[int] = (
+            set()
+        )  # daemon/server pids of the current MPS condition
         self.seen_lock = threading.Lock()
         self.contamination: list[dict] = []
         self.t_start = hooks.clock()
@@ -142,21 +186,31 @@ class _Run:
     def write_run_json(self, status: str, message: str = "") -> None:
         info = self.env_info
         data = {
-            "run_id": self.run_id, "started_at": _iso(self.t_start),
+            "run_id": self.run_id,
+            "started_at": _iso(self.t_start),
             "ended_at": _iso(self.h.clock()) if status != "running" else None,
             "status": f"error: {message}" if status == "error" else status,
-            "complete": status == "complete", "message": message,
-            "gpu": self.gpu, "gpu_name": info.get("gpu_name"),
-            "driver_version": info.get("driver_version"), "nsys_version": info.get("nsys_version"),
+            "complete": status == "complete",
+            "message": message,
+            "gpu": self.gpu,
+            "gpu_name": info.get("gpu_name"),
+            "driver_version": info.get("driver_version"),
+            "nsys_version": info.get("nsys_version"),
             "gso_version": __version__,
             "workloads": {k: {"name": self.wl[k], "args": self.args[k]} for k in "AB"},
-            "duration_s": self.duration_s, "warmup_s": self.warmup_s, "reps": self.reps,
-            "setup_budget_s": self.budget, "profile": self.profile,
+            "duration_s": self.duration_s,
+            "warmup_s": self.warmup_s,
+            "reps": self.reps,
+            "setup_budget_s": self.budget,
+            "profile": self.profile,
             "conditions": [c[0] for c in self.conditions],
-            "conditions_completed": self.done_conditions, "rows_written": self.rows_written,
-            "failed_reps": self.failed, "warnings": self.warnings,
+            "conditions_completed": self.done_conditions,
+            "rows_written": self.rows_written,
+            "failed_reps": self.failed,
+            "warnings": self.warnings,
             "baseline_temp_c": self.base_temp,
-            "dcgm_available": info.get("dcgm_available"), "dcgm_reason": info.get("dcgm_reason"),
+            "dcgm_available": info.get("dcgm_available"),
+            "dcgm_reason": info.get("dcgm_reason"),
             "telemetry_errors": list(getattr(self.h.telemetry, "errors", [])),
             "power_limit_w": self.static.get("power_limit_w"),
             "perf_state_at_start": self.static.get("perf_state"),
@@ -235,15 +289,22 @@ class _Run:
             temp, util = self.h.telemetry.probe()
             if temp is None and util is None and not self.warned_unverifiable:
                 self.warned_unverifiable = True
-                self.warnings.append("cooldown cannot be verified: GPU temperature/utilization unreadable")
-            hot = temp is not None and self.base_temp is not None and temp > self.base_temp + COOLDOWN_DELTA_C
+                self.warnings.append(
+                    "cooldown cannot be verified: GPU temperature/utilization unreadable"
+                )
+            hot = (
+                temp is not None
+                and self.base_temp is not None
+                and temp > self.base_temp + COOLDOWN_DELTA_C
+            )
             busy = util is not None and util > 0
             if not hot and not busy:
                 return False
             if self.h.monotonic() - t0 >= COOLDOWN_MAX_S:
                 self.warnings.append(
                     f"cooldown timed out after {COOLDOWN_MAX_S:g} s (temperature {temp} C, baseline "
-                    f"{self.base_temp} C, utilization {util} %)")
+                    f"{self.base_temp} C, utilization {util} %)"
+                )
                 return True
             self.h.sleep(1.0)
 
@@ -255,22 +316,39 @@ class _Run:
             if self.wl[k] != "trt_infer" or self.args[k] in seen:
                 continue
             seen.append(self.args[k])
-            self.say(f"pre-building the TensorRT engine ({' '.join(self.args[k]) or 'default options'})")
+            self.say(
+                f"pre-building the TensorRT engine ({' '.join(self.args[k]) or 'default options'})"
+            )
             self.check_safe(None)
             with _tmpdir() as d:
                 out = Path(d) / "prebuild.json"
-                spec = ProcSpec("A", "trt_infer", pair.workload_argv(
-                    "trt_infer", self.gpu, 1, out, None, self.args[k]), self.env_for(None, None), out)
+                spec = ProcSpec(
+                    "A",
+                    "trt_infer",
+                    pair.workload_argv(
+                        "trt_infer", self.gpu, 1, out, None, self.args[k]
+                    ),
+                    self.env_for(None, None),
+                    out,
+                )
                 (res,) = pair.run_procs(
-                    [spec], launch=self.launch, clock=self.h.clock, sleep=self.h.sleep,
-                    deadline_at=self.h.clock() + PREBUILD_DEADLINE_S, killpg=self.h.killpg)
+                    [spec],
+                    launch=self.launch,
+                    clock=self.h.clock,
+                    sleep=self.h.sleep,
+                    deadline_at=self.h.clock() + PREBUILD_DEADLINE_S,
+                    killpg=self.h.killpg,
+                )
             if res.payload is None:
                 raise _SetupFailed(f"TensorRT engine pre-build failed: {res.error}")
 
     def run_condition(self, cond, first: bool) -> None:
         name, mps_on, pct_a, pct_b = cond
-        session_cm = (GuardedSession(self.h.session_factory(self.gpu), self.warnings.append)
-                      if mps_on else contextlib.nullcontext(None))
+        session_cm = (
+            GuardedSession(self.h.session_factory(self.gpu), self.warnings.append)
+            if mps_on
+            else contextlib.nullcontext(None)
+        )
         with session_cm as session:
             self.cur_session = session
             self.seen_daemon = set()
@@ -278,10 +356,15 @@ class _Run:
                 self.cooldown()
             self.check_safe(session)
             self.say(f"{name} warm-up ({self.warmup_s:g} s, results discarded)")
-            warm = self.run_rep(name, session, (pct_a, pct_b), self.warmup_s, profile=False)
+            warm = self.run_rep(
+                name, session, (pct_a, pct_b), self.warmup_s, profile=False
+            )
             self.runs_done += 1
             for r in warm:
-                self.say(f"{name} warm-up {r.label}: " + ("ok" if r.payload else f"FAILED {r.error}"))
+                self.say(
+                    f"{name} warm-up {r.label}: "
+                    + ("ok" if r.payload else f"FAILED {r.error}")
+                )
             for rep in range(1, self.reps + 1):
                 timeout = self.cooldown()
                 self.check_safe(session)
@@ -295,39 +378,63 @@ class _Run:
 
     def timing(self) -> str:
         elapsed = self.h.monotonic() - self.mono_start
-        eta = elapsed / self.runs_done * (self.runs_total - self.runs_done) if self.runs_done else None
+        eta = (
+            elapsed / self.runs_done * (self.runs_total - self.runs_done)
+            if self.runs_done
+            else None
+        )
         eta_text = "unknown" if eta is None else f"{eta / 60:.0f} min"
         return f"elapsed {elapsed / 60:.1f} min, ETA {eta_text}"
 
-    def run_rep(self, name, session, pcts, duration, profile, actions_out=None) -> list[ProcResult]:
+    def run_rep(
+        self, name, session, pcts, duration, profile, actions_out=None
+    ) -> list[ProcResult]:
         start_at = round(self.h.clock() + self.budget, 3)
         gpu_arg = session.client_gpu_arg if session is not None else self.gpu
         with _tmpdir() as d:
             specs = []
             for k, pct in zip("AB", pcts, strict=True):
                 out = Path(d) / f"{k}.json"
-                argv = pair.workload_argv(self.wl[k], gpu_arg, duration, out, start_at, self.args[k])
-                specs.append(ProcSpec(k, self.wl[k], argv, self.env_for(session, pct), out))
+                argv = pair.workload_argv(
+                    self.wl[k], gpu_arg, duration, out, start_at, self.args[k]
+                )
+                specs.append(
+                    ProcSpec(k, self.wl[k], argv, self.env_for(session, pct), out)
+                )
             actions = []
             if session is not None:
+
                 def ask():
                     st = self.h.mps_query(pipe_dir=session.pipe_dir)
                     if actions_out is not None:
                         actions_out["server_pct"] = getattr(st, "thread_pct", None)
+
                 actions.append((start_at + SERVER_QUERY_AFTER_S, ask))
             if profile:
+
                 def cap():
-                    actions_out["profile"] = self.h.profiler(self.gpu, session is not None)
+                    actions_out["profile"] = self.h.profiler(
+                        self.gpu, session is not None
+                    )
+
                 actions.append((start_at + (duration - PROFILE_S) / 2, cap))
             return pair.run_procs(
-                specs, launch=self.launch, clock=self.h.clock, sleep=self.h.sleep,
-                deadline_at=start_at + duration + pair.DEADLINE_GRACE_S, actions=actions,
-                killpg=self.h.killpg, on_launch=self.launched.add)
+                specs,
+                launch=self.launch,
+                clock=self.h.clock,
+                sleep=self.h.sleep,
+                deadline_at=start_at + duration + pair.DEADLINE_GRACE_S,
+                actions=actions,
+                killpg=self.h.killpg,
+                on_launch=self.launched.add,
+            )
 
     def measured_rep(self, name, session, pcts, rep, timeout, temp) -> None:
         extra: dict = {}
         t0_ns = int(self.h.clock() * 1e9)
-        results = self.run_rep(name, session, pcts, self.duration_s, self.profile, extra)
+        results = self.run_rep(
+            name, session, pcts, self.duration_s, self.profile, extra
+        )
         t1_ns = int(self.h.clock() * 1e9)
         # Contamination: a foreign process seen during the repetition (per-second sampling) or
         # present right after it (non-aborting ensure_safe). The rows are still written, marked
@@ -336,17 +443,30 @@ class _Run:
         n_foreign = self.h.telemetry.foreign_in_window(t0_ns, t1_ns)
         if n_foreign:
             why_foreign.append("foreign GPU process during window")
-            self.contamination.append({
-                "condition": name, "rep": rep, "source": "telemetry",
-                "foreign_process_count": n_foreign,
-                "message": f"{n_foreign} foreign compute process(es) seen on GPU {self.gpu}"})
+            self.contamination.append(
+                {
+                    "condition": name,
+                    "rep": rep,
+                    "source": "telemetry",
+                    "foreign_process_count": n_foreign,
+                    "message": f"{n_foreign} foreign compute process(es) seen on GPU {self.gpu}",
+                }
+            )
         end_problem = self.end_check(session)
         if end_problem is not None:
             why_foreign.append("foreign GPU process present at end of repetition")
-            self.contamination.append({
-                "condition": name, "rep": rep, "source": "end_check",
-                "foreign_process_count": None, "message": end_problem})
-        rows = self.rows(name, session, pcts, rep, results, extra, timeout, temp, why_foreign)
+            self.contamination.append(
+                {
+                    "condition": name,
+                    "rep": rep,
+                    "source": "end_check",
+                    "foreign_process_count": None,
+                    "message": end_problem,
+                }
+            )
+        rows = self.rows(
+            name, session, pcts, rep, results, extra, timeout, temp, why_foreign
+        )
         self.append_rows(rows)
         if not all(r["ok"] for r in rows):
             self.failed.append({"condition": name, "rep": rep})
@@ -358,18 +478,36 @@ class _Run:
             self.warnings.append(f"{name} rep {rep} started after a cooldown timeout")
         prof = extra.get("profile")
         if prof and prof.get("error"):
-            self.warnings.append(f"{name} rep {rep} profile capture failed: {prof['error']}")
+            self.warnings.append(
+                f"{name} rep {rep} profile capture failed: {prof['error']}"
+            )
         if why_foreign:
-            self.warnings.append(f"{name} rep {rep} contaminated: {'; '.join(why_foreign)}")
-            raise _Abort(f"another process is using GPU {self.gpu} ({name} rep {rep} is marked "
-                         "unfair); stopping")
+            self.warnings.append(
+                f"{name} rep {rep} contaminated: {'; '.join(why_foreign)}"
+            )
+            raise _Abort(
+                f"another process is using GPU {self.gpu} ({name} rep {rep} is marked "
+                "unfair); stopping"
+            )
 
-    def rows(self, name, session, pcts, rep, results, extra, timeout, temp, foreign=()) -> list[dict]:
+    def rows(
+        self, name, session, pcts, rep, results, extra, timeout, temp, foreign=()
+    ) -> list[dict]:
         return build_rows(
-            run_id=self.run_id, condition=name, mps=session is not None, pcts=pcts, rep=rep,
-            results=results, extra=extra, cooldown_timeout=timeout, temp_start=temp,
-            duration_s=self.duration_s, profile=self.profile, window_means=self.h.telemetry.window_means,
-            extra_reasons=foreign)
+            run_id=self.run_id,
+            condition=name,
+            mps=session is not None,
+            pcts=pcts,
+            rep=rep,
+            results=results,
+            extra=extra,
+            cooldown_timeout=timeout,
+            temp_start=temp,
+            duration_s=self.duration_s,
+            profile=self.profile,
+            window_means=self.h.telemetry.window_means,
+            extra_reasons=foreign,
+        )
 
     def execute(self) -> RunOutcome:
         status, message = "error", "terminated unexpectedly"
@@ -377,11 +515,14 @@ class _Run:
             self.h.telemetry.set_own_filter(self.is_own)
             self.h.telemetry.start()
             self.static = self.h.telemetry.static_info()
-            self.base_temp, _ = self.h.telemetry.probe()  # before any pre-build or warm-up
+            self.base_temp, _ = (
+                self.h.telemetry.probe()
+            )  # before any pre-build or warm-up
             if self.base_temp is not None and self.base_temp >= WARM_BASELINE_C:
                 self.warnings.append(
                     f"cooldown baseline {self.base_temp:g} C is already >= {WARM_BASELINE_C:g} C: "
-                    "the GPU was warm before this run, so 'cooled down' is relative to a warm start")
+                    "the GPU was warm before this run, so 'cooled down' is relative to a warm start"
+                )
             self.prebuild()
             for i, cond in enumerate(self.conditions):
                 self.run_condition(cond, first=i == 0)
@@ -410,20 +551,61 @@ def _tmpdir():
     return tempfile.TemporaryDirectory(prefix="gso-bench-")
 
 
-def run_matrix(gpu_index, workload_a, workload_b, out: Path, reps=3, warmup_s=10,
-               duration_s=30, profile=False, launch=subprocess.Popen, *, conditions=None,
-               a_args=(), b_args=(), setup_budget_s=60.0, hooks: Hooks | None = None,
-               env_info: dict | None = None, run_id: str | None = None) -> RunOutcome:
+def run_matrix(
+    gpu_index,
+    workload_a,
+    workload_b,
+    out: Path,
+    reps=3,
+    warmup_s=10,
+    duration_s=30,
+    profile=False,
+    launch=subprocess.Popen,
+    *,
+    conditions=None,
+    a_args=(),
+    b_args=(),
+    setup_budget_s=60.0,
+    hooks: Hooks | None = None,
+    env_info: dict | None = None,
+    run_id: str | None = None,
+) -> RunOutcome:
     names = list(conditions) if conditions is not None else [c[0] for c in CONDITIONS]
-    _validate(workload_a, workload_b, out, reps, warmup_s, duration_s, profile, setup_budget_s, names)
+    _validate(
+        workload_a,
+        workload_b,
+        out,
+        reps,
+        warmup_s,
+        duration_s,
+        profile,
+        setup_budget_s,
+        names,
+    )
     hooks = hooks or Hooks()
     if hooks.telemetry is None:
         from gso.bench.telemetry import NvmlDcgmTelemetry
 
         hooks.telemetry = NvmlDcgmTelemetry(gpu_index)
     Path(out).mkdir(parents=True, exist_ok=True)
-    run = _Run(gpu_index, workload_a, workload_b, out, reps, warmup_s, duration_s, profile,
-               launch, names, a_args, b_args, setup_budget_s, hooks, env_info, run_id)
+    run = _Run(
+        gpu_index,
+        workload_a,
+        workload_b,
+        out,
+        reps,
+        warmup_s,
+        duration_s,
+        profile,
+        launch,
+        names,
+        a_args,
+        b_args,
+        setup_budget_s,
+        hooks,
+        env_info,
+        run_id,
+    )
     run.results.touch()
     run.write_run_json("running")
     return run.execute()

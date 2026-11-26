@@ -180,7 +180,8 @@ class GsoApp(App):
             self.refresh_view()
         elif not isinstance(self.screen, ConfirmCaptureScreen):
             self.push_screen(
-                ConfirmCaptureScreen(self._capture_duration_s, self._gpu_index), self._confirmed
+                ConfirmCaptureScreen(self._capture_duration_s, self._gpu_index),
+                self._confirmed,
             )
 
     def _confirmed(self, ok: bool | None) -> None:
@@ -193,22 +194,30 @@ class GsoApp(App):
         self._capture_started = time.monotonic()
         self._cancel.clear()
         self._done.clear()
-        self.run_worker(self._capture_job, thread=True, name="capture", exit_on_error=False)
+        self.run_worker(
+            self._capture_job, thread=True, name="capture", exit_on_error=False
+        )
         self.refresh_view()
 
     def _capture_job(self):
         # worker thread: nsys, SQLite loading and metric computation all happen here
         try:
             return run_job(
-                self._runner, self._capture_duration_s, self._tmpdir, self._caps,
-                self._gpu_index, self._cancel,
+                self._runner,
+                self._capture_duration_s,
+                self._tmpdir,
+                self._caps,
+                self._gpu_index,
+                self._cancel,
             )
         finally:
             self._done.set()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != "capture" or event.state not in (
-            WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED,
+            WorkerState.SUCCESS,
+            WorkerState.ERROR,
+            WorkerState.CANCELLED,
         ):
             return
         outcome = event.worker.result if event.state is WorkerState.SUCCESS else None
@@ -276,8 +285,12 @@ class GsoApp(App):
         mark = f" {CAPTURING}" if self._capture_running else ""
         for wid, label, metric in _BARS:
             tag = mark if metric.startswith("dcgm.") else ""
-            self.query_one(f"#{wid}", Static).update(f"{label:<{_LABEL_W}}{bar(val(metric))}{tag}")
-        self.query_one("#timeline-view", Static).update(timeline_text(self._capture_report))
+            self.query_one(f"#{wid}", Static).update(
+                f"{label:<{_LABEL_W}}{bar(val(metric))}{tag}"
+            )
+        self.query_one("#timeline-view", Static).update(
+            timeline_text(self._capture_report)
+        )
 
         self.query_one("#proc-table", Static).update(
             self._process_text(recs, cst, now, mps_state == "ON")
@@ -304,7 +317,9 @@ class GsoApp(App):
                 f"{r.pid:<8}{r.name[:17]:<18}{sm:>8}{fmt_vram(r.vram_mib):>8}  {ctx}"
             )
         if not rows:
-            seen = latest(recs, "gpu.util", None, now_ns=now, max_age_ns=self._max_age_ns)
+            seen = latest(
+                recs, "gpu.util", None, now_ns=now, max_age_ns=self._max_age_ns
+            )
             lines.append("(no GPU processes)" if seen is not None else NA)
         return "\n".join(lines)
 
@@ -312,9 +327,13 @@ class GsoApp(App):
         if self._capture_report is None:
             return {}
         pcs = self._capture_report.summary.get("ctx", {}).get("per_context", [])
-        return {pc["pid"]: pc["restores_per_s"] for pc in pcs if pc.get("pid") is not None}
+        return {
+            pc["pid"]: pc["restores_per_s"] for pc in pcs if pc.get("pid") is not None
+        }
 
-    def _series(self, recs: list[Record], metric: str, now: int, width: int) -> list[float | None]:
+    def _series(
+        self, recs: list[Record], metric: str, now: int, width: int
+    ) -> list[float | None]:
         out: list[float | None] = [None] * width
         newest = [-1] * width
         for r in recs:
@@ -330,7 +349,10 @@ class GsoApp(App):
     def _history_text(self, recs: list[Record], now: int) -> str:
         width = max(10, min(HISTORY_S, self.size.width - _LABEL_W - 1))
         lines = [f"History (last {width} s)"]
-        for label, metric in (("GPU Util", "gpu.util"), ("SM Active", "dcgm.sm_active")):
+        for label, metric in (
+            ("GPU Util", "gpu.util"),
+            ("SM Active", "dcgm.sm_active"),
+        ):
             line = sparkline(self._series(recs, metric, now, width), width)
             lines.append(f"{label:<{_LABEL_W}}{line}")
         return "\n".join(lines)
@@ -340,7 +362,9 @@ class GsoApp(App):
         if self._quitting:
             parts.append("waiting for capture to finish…")
         elif self._capture_running:
-            parts.append(f"capture running… {int(time.monotonic() - self._capture_started)} s")
+            parts.append(
+                f"capture running… {int(time.monotonic() - self._capture_started)} s"
+            )
         elif self._capture_error:
             parts.append(f"capture: {self._capture_error}")
         if self._notice is not None and now < self._notice[1]:

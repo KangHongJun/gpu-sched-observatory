@@ -36,7 +36,11 @@ def latest(
     """Newest record for ``metric`` (and ``pid``), or None if absent or older than max_age_ns."""
     best: Record | None = None
     for r in records:
-        if r.metric == metric and r.pid == pid and (best is None or r.ts_ns >= best.ts_ns):
+        if (
+            r.metric == metric
+            and r.pid == pid
+            and (best is None or r.ts_ns >= best.ts_ns)
+        ):
             best = r
     if best is None or now_ns - best.ts_ns > max_age_ns:
         return None

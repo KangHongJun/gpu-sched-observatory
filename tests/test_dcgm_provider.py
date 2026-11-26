@@ -37,7 +37,9 @@ class FakeProc:
         if self._block:
             self._done.wait()
         if self.returncode is None:
-            self.returncode = self._final_rc if not (self.terminated or self.killed) else -15
+            self.returncode = (
+                self._final_rc if not (self.terminated or self.killed) else -15
+            )
 
     def poll(self):
         return self.returncode
@@ -67,7 +69,11 @@ class FakePopen:
 
     def __call__(self, argv, **kw):
         self.calls.append(argv)
-        kwargs = self.seq[min(len(self.calls), len(self.seq)) - 1] if self.seq else self.kwargs
+        kwargs = (
+            self.seq[min(len(self.calls), len(self.seq)) - 1]
+            if self.seq
+            else self.kwargs
+        )
         self.proc = FakeProc(**kwargs)
         self.procs.append(self.proc)
         if not kwargs.get("block"):
@@ -92,6 +98,7 @@ def wait_until(cond, timeout=2.0):
 
 
 # ---- parse_dmon_line ----------------------------------------------------
+
 
 def test_parse_fixture_lines():
     n = 0
@@ -132,6 +139,7 @@ def test_parse_nonfinite():
 
 # ---- provider ---------------------------------------------------------------
 
+
 def test_fixture_all_supported():
     fp = FakePopen(seq=[{"lines": FIXTURE_LINES}, BLOCK])
     p, buf = make(fp)
@@ -140,7 +148,9 @@ def test_fixture_all_supported():
     p.stop()
     recs = buf.snapshot()
     assert len(recs) == 5 * len(DATA_ROWS)
-    assert all(r.unit == "%" and r.source == "dcgm" and r.scope is Scope.DEVICE for r in recs)
+    assert all(
+        r.unit == "%" and r.source == "dcgm" and r.scope is Scope.DEVICE for r in recs
+    )
     assert all(r.pid is None and r.gpu_uuid == "GPU-test" for r in recs)
     first = recs[:5]
     assert [r.metric for r in first] == [FIELDS[i] for i in IDS]
@@ -148,7 +158,16 @@ def test_fixture_all_supported():
     assert first[0].value == pytest.approx(99.2)
     assert all(r.quality is Quality.MEASURED for r in recs)
     assert fp.calls[0] == [
-        "dcgmi", "dmon", "-i", "0", "-e", "1001,1002,1003,1004,1005", "-d", "1000", "-c", "15",
+        "dcgmi",
+        "dmon",
+        "-i",
+        "0",
+        "-e",
+        "1001,1002,1003,1004,1005",
+        "-d",
+        "1000",
+        "-c",
+        "15",
     ]
 
 
@@ -197,13 +216,22 @@ def test_no_supported_fields_no_spawn():
 
 def test_container_argv_exact():
     fp = FakePopen(block=True)
-    p, _ = make(
-        fp, interval_ms=100, dcgmi_cmd=["docker", "exec", "gso-dcgm", "dcgmi"]
-    )
+    p, _ = make(fp, interval_ms=100, dcgmi_cmd=["docker", "exec", "gso-dcgm", "dcgmi"])
     p.start()
     assert fp.calls[0] == [
-        "docker", "exec", "gso-dcgm", "dcgmi", "dmon", "-i", "0",
-        "-e", "1001,1002,1003,1004,1005", "-d", "100", "-c", "150",
+        "docker",
+        "exec",
+        "gso-dcgm",
+        "dcgmi",
+        "dmon",
+        "-i",
+        "0",
+        "-e",
+        "1001,1002,1003,1004,1005",
+        "-d",
+        "100",
+        "-c",
+        "150",
     ]
     p.start()  # no-op while running
     assert len(fp.calls) == 1
@@ -280,6 +308,7 @@ def test_real_process_false():
 
 # ---- fix round 1 ---------------------------------------------------------------
 
+
 def test_run_seconds_validation_and_count():
     with pytest.raises(ValueError):
         DcgmProvider(0, "u", RingBuffer(10), ALL, run_seconds=0)
@@ -348,7 +377,9 @@ def test_reader_exception_sets_error_and_terminates_child():
 
 
 def test_error_uses_last_output_line():
-    fp = FakePopen(lines=["WARNING: something\n", "Error: real problem\n"], returncode=2)
+    fp = FakePopen(
+        lines=["WARNING: something\n", "Error: real problem\n"], returncode=2
+    )
     p, _ = make(fp)
     p.start()
     assert wait_until(lambda: not p.running)

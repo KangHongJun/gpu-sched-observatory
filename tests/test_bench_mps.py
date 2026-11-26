@@ -33,7 +33,9 @@ def violations():
 class Daemon:
     """Fake subprocess.run plus fake process table for one session."""
 
-    def __init__(self, base: Path, start_ok=True, up_after_start=True, quit_removes=True):
+    def __init__(
+        self, base: Path, start_ok=True, up_after_start=True, quit_removes=True
+    ):
         self.pipe = str(base / "pipe")
         self.log = str(base / "log")
         self.up = False
@@ -54,11 +56,16 @@ class Daemon:
         argv = list(argv)
         stdin = kwargs.get("input")
         if argv == [_BINARY, "-d"]:
-            if env.get("CUDA_MPS_PIPE_DIRECTORY") != self.pipe or "CUDA_VISIBLE_DEVICES" not in env:
+            if (
+                env.get("CUDA_MPS_PIPE_DIRECTORY") != self.pipe
+                or "CUDA_VISIBLE_DEVICES" not in env
+            ):
                 _CURRENT.append(f"start env {env.get('CUDA_MPS_PIPE_DIRECTORY')!r}")
             self.starts.append(env)
             self.up = self.start_ok and self.up_after_start
-            return subprocess.CompletedProcess(argv, 0 if self.start_ok else 1, "", "boom")
+            return subprocess.CompletedProcess(
+                argv, 0 if self.start_ok else 1, "", "boom"
+            )
         if argv == [_BINARY] and stdin == "quit\n":
             if env.get("CUDA_MPS_PIPE_DIRECTORY") != self.pipe:
                 _CURRENT.append(f"quit pipe {env.get('CUDA_MPS_PIPE_DIRECTORY')!r}")
@@ -66,7 +73,11 @@ class Daemon:
             if self.quit_removes:
                 self.up = False
             return subprocess.CompletedProcess(argv, 0, "", "")
-        if argv == [_BINARY] and isinstance(stdin, str) and _QUERY_STDIN.fullmatch(stdin):
+        if (
+            argv == [_BINARY]
+            and isinstance(stdin, str)
+            and _QUERY_STDIN.fullmatch(stdin)
+        ):
             if env.get("CUDA_MPS_PIPE_DIRECTORY") != self.pipe:
                 _CURRENT.append(f"query pipe {env.get('CUDA_MPS_PIPE_DIRECTORY')!r}")
             self.queries.append(stdin)
@@ -87,8 +98,14 @@ def no_real_pidfd(monkeypatch):
 
 def make(tmp_path, nvml=None, listing=None, **kw):
     base = tmp_path / "gso-mps"
-    d = Daemon(base, **{k: kw.pop(k) for k in list(kw) if k in
-                        ("start_ok", "up_after_start", "quit_removes")})
+    d = Daemon(
+        base,
+        **{
+            k: kw.pop(k)
+            for k in list(kw)
+            if k in ("start_ok", "up_after_start", "quit_removes")
+        },
+    )
     s = MpsSession(
         2,
         base_dir=base,
@@ -112,8 +129,12 @@ def test_refuses_gpu_with_foreign_process():
 
 
 def test_allows_own_processes():
-    ensure_safe(1, nvml=FakeNvml(gpus=[{}, {}], procs={1: [111]}), own_pids={111},
-                mps_listing=list)
+    ensure_safe(
+        1,
+        nvml=FakeNvml(gpus=[{}, {}], procs={1: [111]}),
+        own_pids={111},
+        mps_listing=list,
+    )
 
 
 def test_idle_gpu_ok_and_nvml_balanced():
@@ -129,12 +150,18 @@ def test_foreign_process_only_in_mps_list_refused():
 
 def test_foreign_mps_daemon_refused():
     with pytest.raises(UnsafeGpuError, match="MPS"):
-        ensure_safe(0, nvml=FakeNvml(), mps_listing=lambda: ["777 nvidia-cuda-mps-control -d"])
+        ensure_safe(
+            0, nvml=FakeNvml(), mps_listing=lambda: ["777 nvidia-cuda-mps-control -d"]
+        )
 
 
 def test_own_mps_daemon_allowed_via_own_pids():
-    ensure_safe(0, nvml=FakeNvml(), own_pids={777},
-                mps_listing=lambda: ["777 nvidia-cuda-mps-control -d"])
+    ensure_safe(
+        0,
+        nvml=FakeNvml(),
+        own_pids={777},
+        mps_listing=lambda: ["777 nvidia-cuda-mps-control -d"],
+    )
 
 
 @pytest.mark.parametrize("idx", [-1, 1, 5, True, "0"])
@@ -180,7 +207,9 @@ def test_message_has_count_not_pids_or_names():
 # ---- private quit sender -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("cmd", ["get_server_list", "quit\n", "quit 1", "", "QUIT", "start_server", None])
+@pytest.mark.parametrize(
+    "cmd", ["get_server_list", "quit\n", "quit 1", "", "QUIT", "start_server", None]
+)
 def test_send_control_refuses_anything_but_quit(cmd):
     calls = []
     with pytest.raises(ValueError):
@@ -265,8 +294,15 @@ def test_base_dir_not_owned_refused(tmp_path):
     base = tmp_path / "gso-mps"
     base.mkdir(mode=0o700)
     d = Daemon(base)
-    s = MpsSession(2, base_dir=base, run=d.run, nvml=FakeNvml(gpus=[{}, {}, {}]),
-                   mps_listing=list, find_own=lambda: d.own(), owner_check=lambda p: False)
+    s = MpsSession(
+        2,
+        base_dir=base,
+        run=d.run,
+        nvml=FakeNvml(gpus=[{}, {}, {}]),
+        mps_listing=list,
+        find_own=lambda: d.own(),
+        owner_check=lambda p: False,
+    )
     with pytest.raises(UnsafeGpuError, match="owned"), s:
         pass
     assert d.starts == [] and d.quits == []
@@ -364,8 +400,14 @@ def test_second_session_refused_by_lock_before_any_run(tmp_path):
     s1, d1, base = make(tmp_path)
     with s1:
         d2 = Daemon(base)
-        s2 = MpsSession(2, base_dir=base, run=d2.run, nvml=FakeNvml(gpus=[{}, {}, {}]),
-                        mps_listing=list, find_own=list)
+        s2 = MpsSession(
+            2,
+            base_dir=base,
+            run=d2.run,
+            nvml=FakeNvml(gpus=[{}, {}, {}]),
+            mps_listing=list,
+            find_own=list,
+        )
         with pytest.raises(UnsafeGpuError, match="another gso MPS session"), s2:
             pass
         assert d2.starts == d2.quits == d2.queries == []
@@ -415,7 +457,9 @@ def test_lock_file_symlink_refused(tmp_path):
 
 def test_prepare_base_oserror_becomes_unsafe(tmp_path, monkeypatch):
     s, d, _ = make(tmp_path)
-    monkeypatch.setattr(os, "chmod", lambda *a, **k: (_ for _ in ()).throw(PermissionError("nope")))
+    monkeypatch.setattr(
+        os, "chmod", lambda *a, **k: (_ for _ in ()).throw(PermissionError("nope"))
+    )
     with pytest.raises(UnsafeGpuError, match="nope"), s:
         pass
     assert d.starts == []
@@ -426,8 +470,12 @@ def test_pidfd_used_when_available(tmp_path, monkeypatch):
     d.own = lambda: [(555, "control")]
     s._identity = lambda pid: (pid, 7)
     sent = []
-    monkeypatch.setattr(os, "pidfd_open", lambda pid: os.open(os.devnull, os.O_RDONLY), raising=False)
-    monkeypatch.setattr(signal, "pidfd_send_signal", lambda fd, sig: sent.append(sig), raising=False)
+    monkeypatch.setattr(
+        os, "pidfd_open", lambda pid: os.open(os.devnull, os.O_RDONLY), raising=False
+    )
+    monkeypatch.setattr(
+        signal, "pidfd_send_signal", lambda fd, sig: sent.append(sig), raising=False
+    )
     with pytest.raises(RuntimeError, match="still running"), s:
         pass
     assert sent == [signal.SIGTERM] and d.killed == []
@@ -441,8 +489,12 @@ def test_pidfd_identity_mismatch_not_signalled(tmp_path, monkeypatch):
     ids = itertools.chain([(555, 7)], itertools.repeat((555, 8)))
     s._identity = lambda pid: next(ids)
     sent = []
-    monkeypatch.setattr(os, "pidfd_open", lambda pid: os.open(os.devnull, os.O_RDONLY), raising=False)
-    monkeypatch.setattr(signal, "pidfd_send_signal", lambda fd, sig: sent.append(sig), raising=False)
+    monkeypatch.setattr(
+        os, "pidfd_open", lambda pid: os.open(os.devnull, os.O_RDONLY), raising=False
+    )
+    monkeypatch.setattr(
+        signal, "pidfd_send_signal", lambda fd, sig: sent.append(sig), raising=False
+    )
     with pytest.raises(RuntimeError), s:
         pass
     assert sent == [] and d.killed == []
@@ -481,7 +533,11 @@ def test_leftover_does_not_hide_body_exception(tmp_path):
     s, d, _ = make(tmp_path, quit_removes=False, stop_timeout_s=0.05)
     d.own = lambda: [(555, "control")]
     s._identity = lambda pid: None
-    with pytest.warns(RuntimeWarning, match="still running"), pytest.raises(ZeroDivisionError), s:
+    with (
+        pytest.warns(RuntimeWarning, match="still running"),
+        pytest.raises(ZeroDivisionError),
+        s,
+    ):
         raise ZeroDivisionError
 
 

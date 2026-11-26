@@ -11,8 +11,17 @@ FIX = Path(__file__).parent / "fixtures"
 GLOBAL = FIX / "nsys_ctxsw_min.sqlite"
 LAUNCHED = FIX / "nsys_launched_min.sqlite"
 KEYS = {
-    "schema_version", "mode", "gpu", "masked", "window_s", "ctx", "kernel",
-    "interprocess_overlap", "dropped_hints", "raw_counts", "notes",
+    "schema_version",
+    "mode",
+    "gpu",
+    "masked",
+    "window_s",
+    "ctx",
+    "kernel",
+    "interprocess_overlap",
+    "dropped_hints",
+    "raw_counts",
+    "notes",
 }
 PCT = {"n", "p50_ms", "p95_ms", "p99_ms"}
 
@@ -25,10 +34,17 @@ def test_key_set_is_exact():
     s = g()
     assert set(s) == KEYS
     assert set(s["ctx"]) == {
-        "switch_rate_per_s", "switch_rate_is_lower_bound", "masked_restore_events", "per_context"
+        "switch_rate_per_s",
+        "switch_rate_is_lower_bound",
+        "masked_restore_events",
+        "per_context",
     }
     assert set(s["kernel"]) == {
-        "count", "duration_ms", "launch_to_start_ms", "ambiguous_api_matches", "pids"
+        "count",
+        "duration_ms",
+        "launch_to_start_ms",
+        "ambiguous_api_matches",
+        "pids",
     }
     assert s["schema_version"] == 1
 
@@ -48,7 +64,9 @@ def test_global_fixture_gpu1():
         assert rs["share"] < hold["share"]
         assert set(rs["slice_ms"]) == PCT
     k = s["kernel"]  # a global capture measures no kernels: unknown, not zero
-    assert k["count"] is None and k["ambiguous_api_matches"] is None and k["pids"] is None
+    assert (
+        k["count"] is None and k["ambiguous_api_matches"] is None and k["pids"] is None
+    )
     assert k["duration_ms"]["n"] is None and k["duration_ms"]["p50_ms"] is None
     assert k["launch_to_start_ms"]["p50_ms"] is None
     assert s["interprocess_overlap"] is None
@@ -94,8 +112,9 @@ def test_empty_sqlite_is_all_null(tmp_path):
     json.dumps(s, allow_nan=False)
 
 
-@pytest.mark.parametrize("args", [(GLOBAL, 1, "global"), (GLOBAL, 0, "global"),
-                                  (LAUNCHED, 1, "launched")])
+@pytest.mark.parametrize(
+    "args", [(GLOBAL, 1, "global"), (GLOBAL, 0, "global"), (LAUNCHED, 1, "launched")]
+)
 def test_json_clean(args):
     path, gpu, mode = args
     s = build_summary(path, gpu=gpu, mode=mode, masked=False)
@@ -119,7 +138,9 @@ def _walk(o):
 def test_lower_bound_note_when_masked_rows_mix(monkeypatch):
     import gso.trace.report as r
 
-    monkeypatch.setattr(r, "switch_rate_is_lower_bound_by_gpu", lambda *a, **k: {1: True})
+    monkeypatch.setattr(
+        r, "switch_rate_is_lower_bound_by_gpu", lambda *a, **k: {1: True}
+    )
     s = g()
     assert s["ctx"]["switch_rate_is_lower_bound"] is True
     assert any("하한" in n for n in s["notes"])
@@ -128,7 +149,9 @@ def test_lower_bound_note_when_masked_rows_mix(monkeypatch):
 def test_timeline_text_global():
     _, tl = build_report(GLOBAL, gpu=1, mode="global", masked=True)
     lines = tl.splitlines()
-    assert "GPU 1" in lines[0] and "global" in lines[0] and "on-demand capture" in lines[0]
+    assert (
+        "GPU 1" in lines[0] and "global" in lines[0] and "on-demand capture" in lines[0]
+    )
     assert "[restore_save]" in tl and "[hold]" in tl
     assert max(len(ln) for ln in lines) <= 120
     assert "real-time" not in tl and "실시간" not in tl
@@ -152,7 +175,9 @@ def test_launched_without_kernel_table_is_null(tmp_path):
     p = tmp_path / "e.sqlite"
     sqlite3.connect(p).close()
     k = build_summary(p, gpu=1, mode="launched", masked=True)["kernel"]
-    assert k["count"] is None and k["pids"] is None and k["ambiguous_api_matches"] is None
+    assert (
+        k["count"] is None and k["pids"] is None and k["ambiguous_api_matches"] is None
+    )
 
 
 def _zoom_rows(tl, name):
@@ -219,14 +244,19 @@ def _hand_built(path, events):
     )
     for i, (ts, pid, tag) in enumerate(events):
         gp = (1 << 48) if pid is None else pid << 24
-        c.execute("INSERT INTO GPU_CONTEXT_SWITCH_EVENTS VALUES (?,1,1,?,?,?)", (ts, gp, tag, i))
+        c.execute(
+            "INSERT INTO GPU_CONTEXT_SWITCH_EVENTS VALUES (?,1,1,?,?,?)",
+            (ts, gp, tag, i),
+        )
     c.commit()
     c.close()
 
 
 def test_zoom_is_clipped_to_the_capture_window(tmp_path):
     p = tmp_path / "c.sqlite"
-    _hand_built(p, [(1_000_000, 100, 8), (3_000_000, 200, 8)])  # w1 = 3 ms; anchor 2 ms before
+    _hand_built(
+        p, [(1_000_000, 100, 8), (3_000_000, 200, 8)]
+    )  # w1 = 3 ms; anchor 2 ms before
     _, tl = build_report(p, gpu=1, mode="global", masked=True)
     rows = _zoom_rows(tl, "hold")
     assert rows and all(len(r) == 40 for r in rows)  # 2 ms / 50 us

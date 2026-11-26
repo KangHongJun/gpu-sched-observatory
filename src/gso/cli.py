@@ -113,8 +113,14 @@ def build_live(args):
     from gso.tui.app import GsoApp  # Textual only on the interactive path
 
     buffer, caps, collector = build_collection(args)
-    return GsoApp(buffer, caps, args.gpu, collector=collector, interval_s=args.interval,
-                  bench_dir=args.bench_dir)
+    return GsoApp(
+        buffer,
+        caps,
+        args.gpu,
+        collector=collector,
+        interval_s=args.interval,
+        bench_dir=args.bench_dir,
+    )
 
 
 def _summary(count: int, path, elapsed_s: float, lost: int, what: str) -> str:
@@ -135,8 +141,16 @@ def run_interactive(args, clock=time.monotonic) -> int:
         app.collector.stop()
     if args.export:
         n = write_records(app.buffer.snapshot(), args.export)
-        print(_summary(n, args.export, clock() - t0, app.buffer.dropped,
-                       "dropped by the ring buffer (not exported)"), file=sys.stderr)
+        print(
+            _summary(
+                n,
+                args.export,
+                clock() - t0,
+                app.buffer.dropped,
+                "dropped by the ring buffer (not exported)",
+            ),
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -144,11 +158,15 @@ def run_headless(args, sleep=time.sleep, clock=time.monotonic) -> int:
     from gso.export import Drainer, open_stream
 
     try:
-        stream = open_stream(args.export)  # first: an unwritable location fails before detect()
+        stream = open_stream(
+            args.export
+        )  # first: an unwritable location fails before detect()
     except OSError as e:
         print(f"gso: cannot write {args.export}: {e}", file=sys.stderr)
         return EXIT_IO_ERROR
-    t0 = clock()  # reset below, once detect() is done: the duration counts collection only
+    t0 = (
+        clock()
+    )  # reset below, once detect() is done: the duration counts collection only
     code = 0
     io_error: OSError | None = None
     collector = None
@@ -189,11 +207,26 @@ def run_headless(args, sleep=time.sleep, clock=time.monotonic) -> int:
         if not committed:
             stream.close()
     shown = args.export if committed or stream.count == 0 else stream.partial_path
-    print(_summary(stream.count, shown, clock() - t0, drainer.lost,
-                   "dropped by the ring buffer before they could be written"), file=sys.stderr)
+    print(
+        _summary(
+            stream.count,
+            shown,
+            clock() - t0,
+            drainer.lost,
+            "dropped by the ring buffer before they could be written",
+        ),
+        file=sys.stderr,
+    )
     if io_error is not None:
-        kept = f"; target not replaced, data kept in {stream.partial_path}" if stream.count else ""
-        print(f"gso: I/O error while writing {args.export}: {io_error}{kept}", file=sys.stderr)
+        kept = (
+            f"; target not replaced, data kept in {stream.partial_path}"
+            if stream.count
+            else ""
+        )
+        print(
+            f"gso: I/O error while writing {args.export}: {io_error}{kept}",
+            file=sys.stderr,
+        )
     status = collector.status
     errors = False
     for label, e in (("NVML", status.nvml_error), ("DCGM", status.dcgm_error)):
@@ -240,25 +273,56 @@ def build_parser() -> argparse.ArgumentParser:
         "  130  interrupted (Ctrl-C; collected records are still written)",
     )
     live.add_argument("--gpu", type=int, required=True, help="GPU index to watch")
-    live.add_argument("--interval", type=_interval, default=1.0,
-                      help=f"refresh interval in seconds, >= {MIN_INTERVAL_S} (default 1.0)")
-    live.add_argument("--dcgm-interval-ms", type=_dcgm_interval_ms, default=1000,
-                      help="DCGM sampling interval in ms, >= 100 (default 1000)")
-    live.add_argument("--dcgmi-cmd", default="dcgmi",
-                      help='dcgmi command, e.g. "docker exec gso-dcgm dcgmi"')
-    live.add_argument("--dcgm-gpu-index", type=int, default=None,
-                      help="GPU index passed to dcgmi -i (differs from the host index in a container)")
-    live.add_argument("--export", metavar="PATH", default=None,
-                      help="write metric records to PATH (.jsonl or .csv). Interactive: written when "
-                           "the screen closes and limited to the buffer (about the last 5 minutes); "
-                           "with --headless: streamed for the whole run via PATH.partial, which "
-                           "replaces PATH only when the run ends in an orderly way")
-    live.add_argument("--headless", action="store_true",
-                      help="no terminal UI: collect for --duration seconds and write --export")
-    live.add_argument("--duration", type=_positive_float, default=None, metavar="SECONDS",
-                      help="headless run length in seconds (> 0)")
-    live.add_argument("--bench-dir", metavar="DIR", default=None,
-                      help="benchmark results directory (from `gso bench`) shown in the F5 Compare view")
+    live.add_argument(
+        "--interval",
+        type=_interval,
+        default=1.0,
+        help=f"refresh interval in seconds, >= {MIN_INTERVAL_S} (default 1.0)",
+    )
+    live.add_argument(
+        "--dcgm-interval-ms",
+        type=_dcgm_interval_ms,
+        default=1000,
+        help="DCGM sampling interval in ms, >= 100 (default 1000)",
+    )
+    live.add_argument(
+        "--dcgmi-cmd",
+        default="dcgmi",
+        help='dcgmi command, e.g. "docker exec gso-dcgm dcgmi"',
+    )
+    live.add_argument(
+        "--dcgm-gpu-index",
+        type=int,
+        default=None,
+        help="GPU index passed to dcgmi -i (differs from the host index in a container)",
+    )
+    live.add_argument(
+        "--export",
+        metavar="PATH",
+        default=None,
+        help="write metric records to PATH (.jsonl or .csv). Interactive: written when "
+        "the screen closes and limited to the buffer (about the last 5 minutes); "
+        "with --headless: streamed for the whole run via PATH.partial, which "
+        "replaces PATH only when the run ends in an orderly way",
+    )
+    live.add_argument(
+        "--headless",
+        action="store_true",
+        help="no terminal UI: collect for --duration seconds and write --export",
+    )
+    live.add_argument(
+        "--duration",
+        type=_positive_float,
+        default=None,
+        metavar="SECONDS",
+        help="headless run length in seconds (> 0)",
+    )
+    live.add_argument(
+        "--bench-dir",
+        metavar="DIR",
+        default=None,
+        help="benchmark results directory (from `gso bench`) shown in the F5 Compare view",
+    )
     from gso import cli_bench, cli_capture, cli_compare
 
     cli_capture.add_parser(sub)
@@ -284,7 +348,9 @@ def _validate_live(parser: argparse.ArgumentParser, args) -> None:
         except report.ReportError as e:
             parser.error(f"--bench-dir: {e}")
     if args.duration is not None and not args.headless:
-        parser.error("--duration requires --headless (the interactive screen has no duration)")
+        parser.error(
+            "--duration requires --headless (the interactive screen has no duration)"
+        )
     if args.export:
         try:
             check_export_path(args.export)
@@ -300,7 +366,9 @@ def _validate_live(parser: argparse.ArgumentParser, args) -> None:
             parser.error(f"directory is not writable: {target.parent}")
 
 
-def main(argv: list[str] | None = None, *, sleep=time.sleep, clock=time.monotonic) -> int:
+def main(
+    argv: list[str] | None = None, *, sleep=time.sleep, clock=time.monotonic
+) -> int:
     parser = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
     tail = None  # everything after "--" is a command to launch (gso capture only)

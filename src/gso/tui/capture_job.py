@@ -43,10 +43,16 @@ CaptureRunner = Callable[[int, Path, Capabilities, int, threading.Event], Captur
 
 
 def run_global_capture(
-    duration_s: int, out_dir: Path, caps: Capabilities, gpu: int, cancel: threading.Event
+    duration_s: int,
+    out_dir: Path,
+    caps: Capabilities,
+    gpu: int,
+    cancel: threading.Event,
 ) -> CaptureReport:
     """Real runner: a GLOBAL capture (no target), then the report for ``gpu``."""
-    res = capture(duration_s, out_dir, caps, run=cancellable_runner(cancel), name="capture")
+    res = capture(
+        duration_s, out_dir, caps, run=cancellable_runner(cancel), name="capture"
+    )
     try:
         if cancel.is_set():
             raise CaptureCancelled("capture cancelled")

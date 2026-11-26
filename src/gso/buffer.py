@@ -49,7 +49,9 @@ class RingBuffer:
         """
         with self._lock:
             seq = min(max(seq, 0), self._total)
-            first = self._total - len(self._items)  # sequence number of the oldest kept record
+            first = self._total - len(
+                self._items
+            )  # sequence number of the oldest kept record
             start = max(seq, first)
             items = list(islice(self._items, start - first, None))
             return items, self._total, start - seq

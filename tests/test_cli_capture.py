@@ -36,8 +36,16 @@ class Fake:
         rep = out / f"{kw['name']}.nsys-rep"
         shutil.copy(FIX / self.fixture, sq)
         rep.write_bytes(b"rep")
-        return CaptureResult(sq, rep, self.mode, True, duration_s, 1_700_000_000_000_000_000,
-                             duration_s + 1.0, ("warn one", "warn two"))
+        return CaptureResult(
+            sq,
+            rep,
+            self.mode,
+            True,
+            duration_s,
+            1_700_000_000_000_000_000,
+            duration_s + 1.0,
+            ("warn one", "warn two"),
+        )
 
 
 @pytest.fixture
@@ -127,16 +135,42 @@ def test_target_passthrough_and_env_defaults(tmp_path, fake, monkeypatch, capsys
     fake.fixture, fake.mode = "nsys_launched_min.sqlite", "launched"
     monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
-    argv = ["--gpu", "1", "--out", str(tmp_path), "--",
-            "uv", "run", "python", "-m", "w", "--gpu", "1", "--duration", "8"]
+    argv = [
+        "--gpu",
+        "1",
+        "--out",
+        str(tmp_path),
+        "--",
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "w",
+        "--gpu",
+        "1",
+        "--duration",
+        "8",
+    ]
     assert run(argv) == 0
     kw = fake.calls[0][2]
-    assert kw["target"] == ["uv", "run", "python", "-m", "w", "--gpu", "1", "--duration", "8"]
+    assert kw["target"] == [
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "w",
+        "--gpu",
+        "1",
+        "--duration",
+        "8",
+    ]
     assert kw["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
     assert kw["env"]["CUDA_VISIBLE_DEVICES"] == "3"  # the user's value wins
     assert kw["end_target"] is False
     assert "may still be running" in capsys.readouterr().err
-    assert json.loads((tmp_path / "summary.json").read_text())["kernel"]["count"] == 2000
+    assert (
+        json.loads((tmp_path / "summary.json").read_text())["kernel"]["count"] == 2000
+    )
 
 
 def test_env_default_cuda_visible_devices(tmp_path, fake, monkeypatch):
@@ -144,7 +178,10 @@ def test_env_default_cuda_visible_devices(tmp_path, fake, monkeypatch):
     monkeypatch.setenv("CUDA_DEVICE_ORDER", "FASTEST_FIRST")
     run(["--gpu", "2", "--out", str(tmp_path), "--", "true"])
     env = fake.calls[0][2]["env"]
-    assert env["CUDA_VISIBLE_DEVICES"] == "2" and env["CUDA_DEVICE_ORDER"] == "FASTEST_FIRST"
+    assert (
+        env["CUDA_VISIBLE_DEVICES"] == "2"
+        and env["CUDA_DEVICE_ORDER"] == "FASTEST_FIRST"
+    )
 
 
 def test_end_target_passed(tmp_path, fake):
@@ -155,7 +192,9 @@ def test_end_target_passed(tmp_path, fake):
 def test_na_for_nulls_and_lower_bound(tmp_path, fake, capsys, monkeypatch):
     import gso.trace.report as r
 
-    monkeypatch.setattr(r, "switch_rate_is_lower_bound_by_gpu", lambda *a, **k: {1: True})
+    monkeypatch.setattr(
+        r, "switch_rate_is_lower_bound_by_gpu", lambda *a, **k: {1: True}
+    )
     run(["--gpu", "1", "--out", str(tmp_path)])
     err = capsys.readouterr().err
     assert "≥" in err
@@ -183,10 +222,14 @@ def test_help_mentions_env_and_no_realtime(capsys):
     assert "real-time" not in out.lower() and "실시간" not in out
 
 
-def test_global_stderr_kernels_na_notes_and_dropped(tmp_path, fake, capsys, monkeypatch):
+def test_global_stderr_kernels_na_notes_and_dropped(
+    tmp_path, fake, capsys, monkeypatch
+):
     import gso.trace.report as r
 
-    monkeypatch.setattr(r, "dropped_hints", lambda p: ["Some CUPTI events might be missing."])
+    monkeypatch.setattr(
+        r, "dropped_hints", lambda p: ["Some CUPTI events might be missing."]
+    )
     run(["--gpu", "1", "--out", str(tmp_path)])
     err = capsys.readouterr().err
     assert "kernels: N/A (global capture records no kernels)" in err
@@ -201,8 +244,10 @@ def test_launched_stderr_rate_na_and_no_context_lines(tmp_path, fake, capsys):
     fake.fixture, fake.mode = "nsys_launched_min.sqlite", "launched"
     run(["--gpu", "1", "--out", str(tmp_path), "--", "true"])
     err = capsys.readouterr().err
-    assert ("context switch rate: N/A (launched capture: only around the launched process)"
-            in err)
+    assert (
+        "context switch rate: N/A (launched capture: only around the launched process)"
+        in err
+    )
     assert "context pid" not in err and "share restore_save" not in err
     assert "kernels: 2000" in err
     s = json.loads((tmp_path / "summary.json").read_text())

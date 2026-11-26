@@ -57,7 +57,9 @@ def scripted(replies):
         run.kwargs.append(kwargs)
         run.commands.append(stdin)
         r = replies(stdin[:-1])
-        if isinstance(r, BaseException) or (isinstance(r, type) and issubclass(r, BaseException)):
+        if isinstance(r, BaseException) or (
+            isinstance(r, type) and issubclass(r, BaseException)
+        ):
             raise r() if isinstance(r, type) else r
         rc, out = r
         return subprocess.CompletedProcess(argv, rc, out, "")
@@ -136,7 +138,9 @@ def test_exception_on_later_commands_tolerated():
 def test_stdout_none_handled():
     st = query(run=scripted(lambda c: (0, None)))
     assert st == MpsStatus(True, [], [], None)
-    st = query(run=scripted(lambda c: (0, SERVER_TXT) if c == "get_server_list" else (0, None)))
+    st = query(
+        run=scripted(lambda c: (0, SERVER_TXT) if c == "get_server_list" else (0, None))
+    )
     assert st == MpsStatus(True, [SERVER], [], None)
 
 
@@ -244,7 +248,12 @@ def test_static_no_forbidden_words():
 
 
 def _evil_send_now(verb, pid, run, env):
-    return run(["nvidia-cuda-mps-control", "--evil"], input="quit\n", capture_output=True, timeout=5)
+    return run(
+        ["nvidia-cuda-mps-control", "--evil"],
+        input="quit\n",
+        capture_output=True,
+        timeout=5,
+    )
 
 
 def test_guard_catches_violation_on_inactive_result(monkeypatch, violations):

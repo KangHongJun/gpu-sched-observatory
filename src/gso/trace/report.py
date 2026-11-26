@@ -59,7 +59,9 @@ def _kernel_gpu_map(path: Path) -> dict[tuple[int, int], int]:
     conn = sqlite3.connect(uri, uri=True)
     try:
         try:
-            rows = conn.execute("SELECT pid, cudaId, gpuId FROM TARGET_INFO_CUDA_DEVICE").fetchall()
+            rows = conn.execute(
+                "SELECT pid, cudaId, gpuId FROM TARGET_INFO_CUDA_DEVICE"
+            ).fetchall()
         except sqlite3.OperationalError:
             return {}
     finally:
@@ -69,14 +71,20 @@ def _kernel_gpu_map(path: Path) -> dict[tuple[int, int], int]:
 
 def _notes(mode: str, masked: bool, lower_bound: bool, masked_only: bool) -> list[str]:
     notes = [
-        ("컨텍스트 구간은 restore_save와 hold 두 구성 모두 추정값이며, 데이터만으로는 "
-         "어느 쪽이 실제 실행에 해당하는지 정할 수 없습니다."),
+        (
+            "컨텍스트 구간은 restore_save와 hold 두 구성 모두 추정값이며, 데이터만으로는 "
+            "어느 쪽이 실제 실행에 해당하는지 정할 수 없습니다."
+        ),
         "커널 구간의 겹침은 SM에서의 동시 실행과 같지 않습니다.",
     ]
     if masked:
-        notes.append("root가 아니어서 다른 사용자 프로세스는 마스킹되어 PID를 알 수 없습니다.")
+        notes.append(
+            "root가 아니어서 다른 사용자 프로세스는 마스킹되어 PID를 알 수 없습니다."
+        )
     if masked_only:
-        notes.append("이 GPU의 컨텍스트 전환 이벤트는 모두 마스킹되어 전환율을 알 수 없습니다(N/A).")
+        notes.append(
+            "이 GPU의 컨텍스트 전환 이벤트는 모두 마스킹되어 전환율을 알 수 없습니다(N/A)."
+        )
     if lower_bound:
         notes.append(
             "컨텍스트 전환율은 하한입니다: 마스킹된 프로세스끼리의 전환은 세지 않습니다."
@@ -102,7 +110,9 @@ def build_report(
     lower = switch_rate_is_lower_bound_by_gpu(events, w0, w1).get(gpu, False)
     lower = bool(rate is not None and lower)
     masked_restores = sum(
-        1 for e in events if e.tag == _RESTORE_START and e.pid is None and w0 <= e.ts_ns < w1
+        1
+        for e in events
+        if e.tag == _RESTORE_START and e.pid is None and w0 <= e.ts_ns < w1
     )
     rps = {k: v for k, v in restores_per_second(events, w0, w1).items() if k[0] == gpu}
 
@@ -186,17 +196,23 @@ def build_report(
     blocks = []
     if mode == "global":
         by_c = {
-            c: {pid_of(k[1]): v for k, v in ivs[c].items() if k[0] == gpu} for c in CONSTRUCTIONS
+            c: {pid_of(k[1]): v for k, v in ivs[c].items() if k[0] == gpu}
+            for c in CONSTRUCTIONS
         }
         first = next(
-            (e.ts_ns for e in events if e.tag == _RESTORE_START and e.pid is not None
-             and w0 <= e.ts_ns < w1),
+            (
+                e.ts_ns
+                for e in events
+                if e.tag == _RESTORE_START and e.pid is not None and w0 <= e.ts_ns < w1
+            ),
             None,
         )
         blocks += [(f"{c} zoom", by_c[c], first) for c in CONSTRUCTIONS]
         blocks += [(c, by_c[c], None) for c in CONSTRUCTIONS]
     else:
-        first = min((s for ivl in by_pid.values() for s, _ in ivl if s < w1), default=None)
+        first = min(
+            (s for ivl in by_pid.values() for s, _ in ivl if s < w1), default=None
+        )
         blocks += [("kernels zoom", by_pid, first), ("kernels", by_pid, None)]
     return summary, _timeline_text(summary, window, blocks, masked_restores)
 
@@ -206,7 +222,10 @@ def build_summary(sqlite_path: Path, *, gpu: int, mode: str, masked: bool) -> di
 
 
 def _timeline_text(
-    summary: dict, window: tuple[int, int], blocks, masked_restores: int,
+    summary: dict,
+    window: tuple[int, int],
+    blocks,
+    masked_restores: int,
     width: int = TIMELINE_WIDTH,
 ) -> str:
     """``blocks``: ``(name, by_pid, zoom_start)``; a zoom block covers
@@ -221,11 +240,13 @@ def _timeline_text(
     lines = [head]
     if w1 > w0:
         cell_ms = (w1 - w0) / 1e6 / width
-        lines.extend(textwrap.wrap(
-            f"Overview: 1 cell = {cell_ms:.2f} ms; a cell is marked if the interval touches it at "
-            "all, so alternation faster than a cell looks continuous (see the zoom blocks).",
-            width=110,
-        ))
+        lines.extend(
+            textwrap.wrap(
+                f"Overview: 1 cell = {cell_ms:.2f} ms; a cell is marked if the interval touches it at "
+                "all, so alternation faster than a cell looks continuous (see the zoom blocks).",
+                width=110,
+            )
+        )
     has_rows = any(any(k is not None for k in by) for _, by, _ in blocks)
     if masked_restores and has_rows:
         lines.append(f"masked contexts not shown: {masked_restores} restore events")
@@ -242,8 +263,10 @@ def _timeline_text(
                 t0 = zoom_start
                 t1 = min(t0 + ZOOM_CELLS * ZOOM_CELL_NS, w1)
                 zoom_cells = max(1, (t1 - t0) // ZOOM_CELL_NS)
-                title += (f"; zoom: +{(t0 - w0) / 1e9:.3f} s .. +{(t1 - t0) / 1e6:.3f} ms, "
-                          f"1 cell = {ZOOM_CELL_NS // 1000} µs")
+                title += (
+                    f"; zoom: +{(t0 - w0) / 1e9:.3f} s .. +{(t1 - t0) / 1e6:.3f} ms, "
+                    f"1 cell = {ZOOM_CELL_NS // 1000} µs"
+                )
         else:
             t0, t1 = w0, w1
             title = f"[{name}] {_BLOCK_HELP[name]}; '=' = overlaps the cell"
@@ -251,7 +274,9 @@ def _timeline_text(
         keys = sorted(k for k in by_key if k is not None)
         if not keys:
             if masked_restores:
-                lines.append(f"  {NA} (intervals exist, but belong to other users' masked processes)")
+                lines.append(
+                    f"  {NA} (intervals exist, but belong to other users' masked processes)"
+                )
             else:
                 lines.append(f"  {NA} (no intervals for this GPU in the capture)")
             continue
@@ -260,7 +285,9 @@ def _timeline_text(
             continue
         cells = zoom_cells if zoom else width
         if zoom:
-            t1 = t0 + cells * ZOOM_CELL_NS  # whole cells inside the window (at least one)
+            t1 = (
+                t0 + cells * ZOOM_CELL_NS
+            )  # whole cells inside the window (at least one)
         rows = render_timeline({k: by_key[k] for k in keys}, t0, t1, cells)
         for k in keys:
             lines.append(f"{k:>8} |{rows[k]}|")
