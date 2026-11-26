@@ -1,3 +1,4 @@
+import pytest
 from textual.widgets import Static
 
 from gso.buffer import RingBuffer
@@ -208,9 +209,11 @@ async def test_mps_client_on_watched_gpu_is_on_and_ctx_na():
         assert "MPS ON" in text(app, "header")
 
 
-async def test_mps_server_process_on_watched_gpu_is_on():
+@pytest.mark.parametrize("comm", ["nvidia-cuda-mps", "nvidia-cuda-mps-server"])
+async def test_mps_server_process_on_watched_gpu_is_on(comm):
+    # /proc/<pid>/comm is truncated to 15 chars, so the server shows up as "nvidia-cuda-mps"
     buf = mps_buffer(is_mps=0.0)
-    status = CollectorStatus(process_names={1420: "nvidia-cuda-mps-server"})
+    status = CollectorStatus(process_names={1420: comm})
     app = make_app(buf, collector=_C(status))
     async with app.run_test() as pilot:
         await settle(pilot)

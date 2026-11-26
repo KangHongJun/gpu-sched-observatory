@@ -113,7 +113,8 @@ without root. Nothing was re-verified on other GPUs, drivers or nsys versions.
 ## CUDA MPS
 
 - **MPS detection.** A GPU counts as MPS ON when the NVML/`nvidia-smi` process list shows
-  `nvidia-cuda-mps-server` or a process of type `M` / `M+C`. MPS control commands work only
+  the MPS server, recognised by its truncated process name `nvidia-cuda-mps` (the kernel's
+  `/proc/<pid>/comm` is limited to 15 characters), or a process of type `M` / `M+C`. MPS control commands work only
   for the user who owns the control pipe, so they are not used for the GPU's state. The
   header's `MPS ON/OFF` and the `N/A (MPS)` rule for CTX SW/s come from the watched GPU's
   own process list. An MPS daemon with no processes on the watched GPU is therefore not

@@ -38,7 +38,10 @@ from gso.tui.widgets import (
     sparkline,
 )
 
-MPS_SERVER_COMM = "nvidia-cuda-mps-server"
+# /proc/<pid>/comm is cut to 15 chars, so the MPS server appears as "nvidia-cuda-mps".
+# The full name matches too. nvidia-cuda-mps-control truncates to the same prefix, but it
+# never holds a compute context on the watched GPU, so it cannot cause a false ON.
+MPS_COMM_PREFIX = "nvidia-cuda-mps"
 _S = 1_000_000_000
 HISTORY_S = 60
 NOTICE_S = 5
@@ -256,7 +259,7 @@ class GsoApp(App):
             return NA
         names = cst.process_names if cst is not None else {}
         for r in rows:
-            if r.is_mps or names.get(r.pid) == MPS_SERVER_COMM:
+            if r.is_mps or names.get(r.pid, "").startswith(MPS_COMM_PREFIX):
                 return "ON"
         return "OFF"
 
