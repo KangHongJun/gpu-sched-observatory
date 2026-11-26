@@ -5,12 +5,13 @@
 SQL 값은 모두 바인딩 파라미터로 넘긴다(테이블 이름은 이 모듈의 상수만 쓴다).
 ``PROCESSES`` 테이블은 조회하지 않는다(PID는 ``globalPid``에서 디코딩, §2.2, §8).
 
-구간 이름은 중립적으로 쓴다. ``restore_save``와 ``hold`` 중 어느 쪽이 컨텍스트의
-"실행 중"에 해당하는지는 데이터가 정하지 못한다(§4 주의, RESULTS.md 결정 2).
+구간 이름은 중립적으로 쓴다. ``restore_save``와 ``hold`` 중
+어느 쪽이 컨텍스트의 실제 GPU 점유에 해당하는지는 데이터가 정하지 못한다(§4 주의, RESULTS.md 결정 2).
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -23,12 +24,14 @@ __all__ = [
     "CtxEvent",
     "IntervalStats",
     "KernelInterval",
+    "KernelLoadStats",
     "capture_window",
     "ctx_intervals",
     "ctx_intervals_with_stats",
     "dropped_hints",
     "load_ctx_events",
     "load_kernels",
+    "load_kernels_with_stats",
     "raw_counts",
 ]
 
@@ -43,6 +46,7 @@ STOPPED_TEXT = "Profiling has stopped."  # §4.3 캡처 창 w1
 # "events were discarded ... outside the report's time range"는 §6이 버퍼 유실이
 # 아니라고 적었으므로 일부러 넣지 않았다.
 _LOSS_PATTERNS = ("might be missing", "events dropped")
+_ZERO_DROPPED = re.compile(r"events dropped:\s*0(?!\d)")
 
 _READ_TABLES = (
     "GPU_CONTEXT_SWITCH_EVENTS",
@@ -54,7 +58,7 @@ _READ_TABLES = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CtxEvent:
     """``GPU_CONTEXT_SWITCH_EVENTS`` 한 행.
 
@@ -74,7 +78,7 @@ class CtxEvent:
     ts_ns: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KernelInterval:
     """``CUPTI_ACTIVITY_KIND_KERNEL`` 한 행(GPU 실행 시작/종료, §5.1).
 
@@ -82,9 +86,11 @@ class KernelInterval:
     ``context_id``는 CUPTI의 값이다(§3.1). ``api_start_ns``는 이 커널을 띄운 CUDA
     런타임 API 호출의 시작 시각이다(``correlationId`` 조인, §5.3). 매칭되는 런타임
     행이 없거나 런타임 테이블이 없으면 None. 제출/큐 대기 시각은 export에 없다(§5.1).
-    ``name``은 ``shortName`` 열을 ``StringIds``로 푼 값이다(§5.2는 세 열을 같은
-    방식으로 풀 수 있다고만 적었고, §9.1의 읽을 수 있는 이름 예시가 ``shortName``이라
-    그것을 골랐다). ``StringIds`` 행이 없으면 ``stringid:<id>``.
+    ``name``은 ``demangledName``(템플릿 인자가 풀린 이름, 커널의 식별자)을
+    ``StringIds``로 푼 값이다. 그 값이 NULL이거나 ``StringIds``에 없으면 ``mangledName``,
+    그것도 없으면 ``shortName``으로 대신하고, 모두 없으면 ``stringid:<demangledName id>``.
+    ``short_name``은 ``shortName`` 열을 푼 값으로 표시 전용이다(템플릿 인자가 없고
+    잘려 있을 수 있어 같은 이름끼리 묶는 키로 쓰지 않는다).
     """
 
     pid: int | None
@@ -95,6 +101,7 @@ class KernelInterval:
     end_ns: int
     api_start_ns: int | None
     name: str
+    short_name: str | None
 
 
 @dataclass(frozen=True)
@@ -108,6 +115,17 @@ class IntervalStats:
     leading_clipped: int = 0  # 앞쪽 7로 w0에서 시작한 구간
     trailing_open: int = 0  # 끝에서 열려 있어 w1로 자른 구간
     repeated_restores: int = 0  # hold: 현재 보유자의 8(보유 계속)
+    zero_length_dropped: int = 0  # 창으로 자른 뒤 길이가 0이 되어 내보내지 않은 구간
+
+
+@dataclass(frozen=True)
+class KernelLoadStats:
+    """``load_kernels_with_stats``가 센 값."""
+
+    kernels: int = 0
+    # 같은 correlationId와 같은 프로세스의 런타임 행이 둘 이상이라 api_start_ns를
+    # None으로 둔 커널 수
+    ambiguous_api_matches: int = 0
 
 
 # --------------------------------------------------------------------- 접근
@@ -191,49 +209,74 @@ def load_ctx_events(path: Path | str, gpu_id: int | None = None) -> list[CtxEven
 
 
 def load_kernels(path: Path | str) -> list[KernelInterval]:
-    """``CUPTI_ACTIVITY_KIND_KERNEL``을 ``start, end`` 순으로. 테이블이 없으면 ``[]``.
+    """``CUPTI_ACTIVITY_KIND_KERNEL``을 읽는다. 테이블이 없으면 ``[]``.
 
-    ``api_start_ns``는 런타임 테이블이 있을 때만 채운다(같은 ``correlationId``의 가장
-    이른 ``start``).
+    ``load_kernels_with_stats(path)[0]``와 같다.
+    """
+    return load_kernels_with_stats(path)[0]
+
+
+def load_kernels_with_stats(
+    path: Path | str,
+) -> tuple[list[KernelInterval], KernelLoadStats]:
+    """``load_kernels``와 같고 ``KernelLoadStats``를 함께 돌려준다.
+
+    정렬은 ``start, end, correlationId, rowid`` 순. ``api_start_ns``는 런타임 테이블이
+    있을 때, ``correlationId``가 같고 런타임 행의 ``globalTid``로 디코딩한 프로세스가
+    커널의 ``globalPid``로 디코딩한 프로세스와 같은 행의 ``start``다(§2.2, §5.3).
+    조건을 만족하는 행이 둘 이상이면 하나를 고르지 않고 None으로 두며 세어 둔다.
     """
     with _open(path) as conn:
         tables = _tables(conn)
         if "CUPTI_ACTIVITY_KIND_KERNEL" not in tables:
-            return []
+            return [], KernelLoadStats()
         has_names = "StringIds" in tables
         has_runtime = "CUPTI_ACTIVITY_KIND_RUNTIME" in tables
-        select = (
+        sql = (
             "SELECT k.globalPid, k.deviceId, k.contextId, k.streamId, k.start, k.end,"
-            " {api}, k.shortName, {name}"
+            " {api}, k.demangledName, {names}"
             " FROM CUPTI_ACTIVITY_KIND_KERNEL k"
-        )
-        sql = select.format(
-            api="r.s" if has_runtime else "NULL",
-            name="s.value" if has_names else "NULL",
+        ).format(
+            api="CASE WHEN r.n = 1 THEN r.s END, COALESCE(r.n > 1, 0)"
+            if has_runtime
+            else "NULL, 0",
+            names="sd.value, sm.value, ss.value" if has_names else "NULL, NULL, NULL",
         )
         if has_runtime:
             sql += (
-                " LEFT JOIN (SELECT correlationId, MIN(start) AS s"
-                " FROM CUPTI_ACTIVITY_KIND_RUNTIME GROUP BY correlationId) r"
+                " LEFT JOIN (SELECT correlationId,"
+                " (globalTid >> 24) & 16777215 AS p, MIN(start) AS s, COUNT(*) AS n"
+                " FROM CUPTI_ACTIVITY_KIND_RUNTIME GROUP BY correlationId, p) r"
                 " ON r.correlationId = k.correlationId"
+                " AND r.p = (k.globalPid >> 24) & 16777215"
             )
         if has_names:
-            sql += " LEFT JOIN StringIds s ON s.id = k.shortName"
-        sql += " ORDER BY k.start, k.end"
+            sql += (
+                " LEFT JOIN StringIds sd ON sd.id = k.demangledName"
+                " LEFT JOIN StringIds sm ON sm.id = k.mangledName"
+                " LEFT JOIN StringIds ss ON ss.id = k.shortName"
+            )
+        sql += " ORDER BY k.start, k.end, k.correlationId, k.rowid"
         rows = conn.execute(sql).fetchall()
-    return [
-        KernelInterval(
-            pid=_pid_of(gpid),
-            device_id=dev,
-            context_id=ctx,
-            stream_id=stream,
-            start_ns=start,
-            end_ns=end,
-            api_start_ns=api,
-            name=name if name is not None else f"stringid:{sid}",
+    out = []
+    ambiguous = 0
+    for gpid, dev, ctx, stream, start, end, api, amb, did, dem, man, short in rows:
+        ambiguous += amb
+        name = dem if dem is not None else man if man is not None else short
+        out.append(
+            KernelInterval(
+                pid=_pid_of(gpid),
+                device_id=dev,
+                context_id=ctx,
+                stream_id=stream,
+                start_ns=start,
+                end_ns=end,
+                api_start_ns=api,
+                name=name if name is not None else f"stringid:{did}",
+                short_name=short,
+            )
         )
-        for gpid, dev, ctx, stream, start, end, api, sid, name in rows
-    ]
+    return out, KernelLoadStats(kernels=len(out), ambiguous_api_matches=ambiguous)
 
 
 def capture_window(path: Path | str) -> tuple[int, int]:
@@ -277,7 +320,8 @@ def dropped_hints(path: Path | str) -> list[str]:
     §6은 인식 규칙을 따로 정하지 않고 문장만 인용한다. 인용된 문장 중 대소문자 무시로
     ``might be missing``(CUPTI 이벤트 누락 가능) 또는 ``events dropped``(불완전
     CUPTI 이벤트 버림)를 포함하는 것을 고른다. "events were discarded ... outside the
-    report's time range"는 §6이 버퍼 유실이 아니라고 명시해 제외한다.
+    report's time range"는 §6이 버퍼 유실이 아니라고 명시해 제외한다. 개수가 0인
+    문장("events dropped: 0.")은 유실 표시가 아니므로 제외한다.
     """
     with _open(path) as conn:
         if "DIAGNOSTIC_EVENT" not in _tables(conn):
@@ -285,7 +329,12 @@ def dropped_hints(path: Path | str) -> list[str]:
         rows = conn.execute(
             "SELECT text FROM DIAGNOSTIC_EVENT WHERE text IS NOT NULL ORDER BY timestamp"
         ).fetchall()
-    return [t for (t,) in rows if any(p in t.lower() for p in _LOSS_PATTERNS)]
+    return [
+        t
+        for (t,) in rows
+        if any(p in t.lower() for p in _LOSS_PATTERNS)
+        and not _ZERO_DROPPED.search(t.lower())
+    ]
 
 
 # ---------------------------------------------------------------- 구간 구성
@@ -294,36 +343,40 @@ def dropped_hints(path: Path | str) -> list[str]:
 def ctx_intervals(
     events: list[CtxEvent],
     construction: Construction,
-    window: tuple[int, int] | None = None,
+    *,
+    window: tuple[int, int],
 ) -> dict[tuple[int, int], list[tuple[int, int]]]:
     """컨텍스트 전환 이벤트에서 구간을 만든다(§4.3). 구성은 호출자가 고른다.
 
     키는 ``(gpu_id, global_pid)``다. §4.3이 이벤트를 ``(gpuId, globalPid)``로 나누므로
     그 ``global_pid``가 context_key이며(이벤트 테이블의 ``contextId``는 쓰지 않는다),
     마스킹 행은 키가 되지 않는다. 값은 정렬되고 서로 겹치지 않는 ``[시작, 끝)`` ns.
-    끝점은 창 ``[w0, w1]``로 자르고 길이 0 이하인 구간은 내보내지 않는다.
+    끝점은 창 ``[w0, w1]``로 자른다.
 
     - ``restore_save``: 같은 컨텍스트의 RESTORE_START→SAVE_END 구간. 마스킹 행은
       무시한다.
     - ``hold``: 컨텍스트가 다른 컨텍스트의 다음 RESTORE_START까지 쥐고 있다고 보는
       구간. 마스킹 행의 RESTORE_START는 현재 보유자의 보유를 끝낸다.
 
-    어느 쪽도 "실행 중"이라고 단정하지 않는다. ``window``가 None이면 ``(0, 이벤트
-    timestamp 최댓값)``이며, 실제 캡처에서는 ``capture_window(path)``를 넘긴다.
+    어느 쪽도 컨텍스트의 실제 GPU 점유라고 단정하지 않는다. ``window``는 필수이고
+    ``capture_window(path)``의 결과를 넘긴다(§4.3의 w1은 진단 행과 모든 gpuId의 이벤트를
+    보므로, 걸러낸 이벤트 목록에서는 계산할 수 없다). 길이 0이 된 구간은 내보내지 않고
+    ``IntervalStats.zero_length_dropped``로 센다.
     """
-    return ctx_intervals_with_stats(events, construction, window)[0]
+    return ctx_intervals_with_stats(events, construction, window=window)[0]
 
 
 def ctx_intervals_with_stats(
     events: list[CtxEvent],
     construction: Construction,
-    window: tuple[int, int] | None = None,
+    *,
+    window: tuple[int, int],
 ) -> tuple[dict[tuple[int, int], list[tuple[int, int]]], IntervalStats]:
     """``ctx_intervals``와 같고, 센 예외 상황(``IntervalStats``)을 함께 돌려준다."""
     if construction not in ("restore_save", "hold"):
         raise ValueError(f"unknown construction: {construction!r}")
     if window is None:
-        window = (0, max((e.ts_ns for e in events), default=0))
+        raise ValueError("window is required: pass capture_window(path)")
     w0, w1 = window
 
     by_gpu: dict[int, list[CtxEvent]] = {}
@@ -337,6 +390,8 @@ def ctx_intervals_with_stats(
         a, b = min(max(a, w0), w1), min(max(b, w0), w1)
         if a < b:
             out.setdefault(key, []).append((a, b))
+        else:
+            counts["zero_length_dropped"] += 1
 
     for gpu in sorted(by_gpu):
         evs = sorted(by_gpu[gpu], key=lambda e: e.ts_ns)  # 안정 정렬: 동률은 입력 순서
