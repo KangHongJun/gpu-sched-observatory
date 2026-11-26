@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ MIN_PROFILE_DURATION_S = 20
 PREBUILD_DEADLINE_S = 1800.0
 SERVER_QUERY_AFTER_S = 2.0
 WARM_BASELINE_C = 45.0
+SAFE_RETRY_S = 5.0  # a refusal must persist this long (our own MPS server may still be exiting)
 
 
 @dataclass
@@ -123,6 +125,8 @@ class _Run:
         self.static: dict = {}
         self.launched: set[int] = set()
         self.cur_session = None
+        self.seen_daemon: set[int] = set()  # daemon/server pids of the current MPS condition
+        self.seen_lock = threading.Lock()
         self.contamination: list[dict] = []
         self.t_start = hooks.clock()
         self.mono_start = hooks.monotonic()
@@ -190,23 +194,39 @@ class _Run:
         except OSError:
             return False
         s = self.cur_session
-        return s is not None and pid in s.own_daemon_pids
+        return s is not None and pid in self.own_pids(s)
+
+    def own_pids(self, session) -> frozenset[int]:
+        """The session's daemon/server pids, plus every one seen earlier in this condition (the
+        MPS server is replaced between repetitions and the old one may still be exiting)."""
+        if session is None:
+            return frozenset()
+        now = frozenset(session.own_daemon_pids)
+        with self.seen_lock:
+            self.seen_daemon |= now
+            return frozenset(self.seen_daemon)
+
+    def safe_problem(self, session) -> str | None:
+        """ensure_safe, retried for SAFE_RETRY_S: the reason it keeps failing, or None."""
+        deadline = self.h.monotonic() + SAFE_RETRY_S
+        while True:
+            try:
+                self.h.ensure_safe(self.gpu, own_pids=self.own_pids(session))
+                return None
+            except UnsafeGpuError as e:
+                msg = str(e)
+            if self.h.monotonic() >= deadline:
+                return msg
+            self.h.sleep(1.0)
 
     def end_check(self, session) -> str | None:
-        """Non-aborting ensure_safe after a repetition: the reason it fails, or None."""
-        own = session.own_daemon_pids if session is not None else frozenset()
-        try:
-            self.h.ensure_safe(self.gpu, own_pids=own)
-        except UnsafeGpuError as e:
-            return str(e)
-        return None
+        """Non-aborting safety check after a repetition."""
+        return self.safe_problem(session)
 
     def check_safe(self, session) -> None:
-        own = session.own_daemon_pids if session is not None else frozenset()
-        try:
-            self.h.ensure_safe(self.gpu, own_pids=own)
-        except UnsafeGpuError as e:
-            raise _Abort(str(e)) from e
+        problem = self.safe_problem(session)
+        if problem is not None:
+            raise _Abort(problem)
 
     def cooldown(self) -> bool:
         """Wait until temperature <= baseline + 3 C and utilization is 0 %, at most 60 s."""
@@ -253,6 +273,7 @@ class _Run:
                       if mps_on else contextlib.nullcontext(None))
         with session_cm as session:
             self.cur_session = session
+            self.seen_daemon = set()
             if not first:
                 self.cooldown()
             self.check_safe(session)

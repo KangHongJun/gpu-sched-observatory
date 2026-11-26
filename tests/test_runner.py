@@ -190,7 +190,8 @@ class Rig:
         self.events = []
         self.launcher = FakeLauncher(self.time, self.events, behavior)
         self.safe_calls = []
-        self.refuse_at = refuse_at
+        self.refuse_at = refuse_at  # refuse this call and every later one (a foreign process stays)
+        self.refuse_until = None  # ... until this call number (exclusive): a transient condition
         self.telemetry = FakeTelemetry(probe_fn, means, self.events, foreign)
         self.sessions = []
         self.queries = []
@@ -200,7 +201,9 @@ class Rig:
         def ensure_safe(gpu, nvml=None, own_pids=frozenset(), mps_listing=None):
             self.safe_calls.append((gpu, frozenset(own_pids)))
             self.events.append(("safe", frozenset(own_pids)))
-            if self.refuse_at == len(self.safe_calls):
+            n = len(self.safe_calls)
+            if self.refuse_at is not None and n >= self.refuse_at and (
+                    self.refuse_until is None or n < self.refuse_until):
                 raise UnsafeGpuError("another user's process appeared")
 
         def session_factory(gpu):
@@ -937,3 +940,40 @@ def test_trt_row_with_unknown_build_time_says_unknown(tmp_path, monkeypatch):
     row = r.rows()[0]
     assert row["fair"] is False and "build time unknown" in row["fair_reason"]
     assert "engine built" not in row["fair_reason"]
+
+
+def test_transient_refusal_is_retried_not_an_abort(rig):
+    # e.g. our own MPS server still exiting right after the clients ended
+    rig.refuse_at, rig.refuse_until = 3, 5  # the post-check of rep 1 fails twice, then passes
+    out = rig.run(conditions=["mps_off"])
+    assert out.status == "complete"
+    assert all(r["fair"] for r in rig.rows())
+    assert rig.run_json()["contamination_events"] == []
+
+
+def test_persistent_refusal_still_aborts_after_the_retries(rig):
+    rig.refuse_at = 2  # pre-check of rep 1 and everything after
+    out = rig.run(conditions=["mps_off"])
+    assert out.status == "aborted" and rig.rows() == []
+    assert len(rig.safe_calls) > 3  # it did retry
+
+
+def test_daemon_pids_seen_earlier_in_the_condition_stay_own(tmp_path):
+    r = Rig(tmp_path)
+
+    class Moving(FakeSession):
+        n = 0
+
+        def __init__(self, events):
+            self.events, self.pipe_dir, self.client_gpu_arg = events, "/fake/pipe", 0
+
+        @property
+        def own_daemon_pids(self):
+            Moving.n += 1
+            return frozenset({9000 + Moving.n})  # a new server pid at every look
+
+    r.hooks.session_factory = lambda gpu: Moving(r.events)
+    r.run(conditions=["mps_50_50"])
+    last = r.safe_calls[-1][1]
+    assert {9001, 9002} <= set(last) and len(last) >= 3  # earlier servers are still ours
+    assert r.run_json()["status"] == "complete"
