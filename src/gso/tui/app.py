@@ -2,17 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
+import shutil
+import tempfile
+import threading
 import time
+from pathlib import Path
 from typing import ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import Static
+from textual.worker import Worker, WorkerState
 
 from gso.buffer import RingBuffer
 from gso.capability import Capabilities
 from gso.record import Record
+from gso.tui.capture_job import (
+    CaptureReport,
+    CaptureRunner,
+    run_global_capture,
+    run_job,
+)
+from gso.tui.timeline_view import ConfirmCaptureScreen, capture_label, timeline_text
 from gso.tui.widgets import (
     NA,
     bar,
@@ -37,6 +50,8 @@ _BARS = [
     ("nvdec", "NVDEC", "gpu.dec_util"),
 ]
 _LABEL_W = 14
+EXIT_WAIT_S = 15
+CAPTURING = "캡처 중"  # DCGM values stay visible but are marked while nsys runs (RESULTS, Task 8)
 
 
 def _truncate(text: str, width: int) -> str:
@@ -50,6 +65,8 @@ class GsoApp(App):
     Screen { layout: vertical; }
     #header { height: 1; text-style: bold; }
     .bar { height: 1; }
+    #metrics-view { height: 1fr; }
+    #timeline-view { height: 1fr; display: none; overflow: hidden; }
     #proc-table { height: 1fr; min-height: 2; margin-top: 1; overflow: hidden; }
     #history { height: 4; }
     #status { height: 1; }
@@ -60,7 +77,7 @@ class GsoApp(App):
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
         Binding("f2", "view('F2 Metrics')", show=False),
         Binding("f3", "view('F3 Timeline')", show=False),
-        Binding("f4", "view('F4 Capture')", show=False),
+        Binding("f4", "capture", show=False),
         Binding("f5", "view('F5 Compare')", show=False),
     ]
 
@@ -72,6 +89,8 @@ class GsoApp(App):
         collector=None,
         interval_s: float = 1.0,
         clock_ns=time.time_ns,
+        capture_runner: CaptureRunner | None = None,
+        capture_duration_s: int = 10,
     ) -> None:
         super().__init__()
         self._buffer = buffer
@@ -82,6 +101,18 @@ class GsoApp(App):
         self._clock_ns = clock_ns
         self._max_age_ns = int(3 * interval_s * _S)
         self._notice: tuple[str, int] | None = None
+        self._runner = capture_runner or run_global_capture
+        self._capture_duration_s = capture_duration_s
+        self._capture_report: CaptureReport | None = None
+        self._capture_running = False
+        self._capture_started = 0.0
+        self._capture_error: str | None = None
+        self._cancel = threading.Event()
+        self._done = threading.Event()
+        self._done.set()
+        self._tmpdir: Path | None = None
+        self._quitting = False
+        self._view = "F2"
 
     @property
     def buffer(self) -> RingBuffer:
@@ -94,11 +125,13 @@ class GsoApp(App):
     # -- layout -----------------------------------------------------------
     def compose(self) -> ComposeResult:
         yield Static("", id="header", markup=False)
-        with Vertical(id="bars", classes="bars"):
-            for wid, _, _ in _BARS:
-                yield Static("", id=wid, classes="bar", markup=False)
-        yield Static("", id="proc-table", markup=False)
-        yield Static("", id="history", markup=False)
+        with Vertical(id="metrics-view"):
+            with Vertical(id="bars", classes="bars"):
+                for wid, _, _ in _BARS:
+                    yield Static("", id=wid, classes="bar", markup=False)
+            yield Static("", id="proc-table", markup=False)
+            yield Static("", id="history", markup=False)
+        yield Static("", id="timeline-view", markup=False)
         yield Static("", id="status", markup=False)
         yield Static(FOOTER, id="footer", markup=False)
 
@@ -111,14 +144,86 @@ class GsoApp(App):
     async def on_unmount(self) -> None:
         if self._collector is not None:
             self._collector.stop()
+        self._cancel.set()  # ends a running capture through the wrapper's own cancel path
+        await asyncio.to_thread(self._done.wait, EXIT_WAIT_S)
+        if self._tmpdir is not None:
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     # -- actions ----------------------------------------------------------
+    def _set_notice(self, text: str) -> None:
+        self._notice = (text, self._clock_ns() + NOTICE_S * _S)
+
     def action_view(self, name: str) -> None:
-        if name.startswith("F2"):
+        if name.startswith(("F2", "F3")):
             self._notice = None
+            self._view = name[:2]
+            self._show_view()
         else:
-            self._notice = (f"{name}: not available yet", self._clock_ns() + NOTICE_S * _S)
+            self._set_notice(f"{name}: not available yet")
         self.refresh_view()
+
+    def _show_view(self) -> None:
+        self.query_one("#metrics-view").display = self._view == "F2"
+        self.query_one("#timeline-view").display = self._view == "F3"
+
+    def action_capture(self) -> None:
+        if self._capture_running:
+            self._set_notice("capture already running")
+            self.refresh_view()
+        elif not isinstance(self.screen, ConfirmCaptureScreen):
+            self.push_screen(
+                ConfirmCaptureScreen(self._capture_duration_s, self._gpu_index), self._confirmed
+            )
+
+    def _confirmed(self, ok: bool | None) -> None:
+        if not ok or self._capture_running:
+            return
+        if self._tmpdir is None:
+            self._tmpdir = Path(tempfile.mkdtemp(prefix="gso-capture-"))
+        self._capture_error = None
+        self._capture_running = True
+        self._capture_started = time.monotonic()
+        self._cancel.clear()
+        self._done.clear()
+        self.run_worker(self._capture_job, thread=True, name="capture", exit_on_error=False)
+        self.refresh_view()
+
+    def _capture_job(self):
+        # worker thread: nsys, SQLite loading and metric computation all happen here
+        try:
+            return run_job(
+                self._runner, self._capture_duration_s, self._tmpdir, self._caps,
+                self._gpu_index, self._cancel,
+            )
+        finally:
+            self._done.set()
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name != "capture" or event.state not in (
+            WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED,
+        ):
+            return
+        outcome = event.worker.result if event.state is WorkerState.SUCCESS else None
+        self._capture_running = False
+        if outcome is not None and outcome.report is not None:
+            self._capture_report = outcome.report
+        elif outcome is not None:
+            self._capture_error = outcome.error
+        elif event.state is WorkerState.ERROR:
+            self._capture_error = f"capture failed: {event.worker.error}"
+        if self.is_mounted:
+            self.refresh_view()
+
+    async def action_quit(self) -> None:
+        if self._capture_running:
+            elapsed = time.monotonic() - self._capture_started
+            self._quitting = True
+            self.refresh_view()
+            await asyncio.sleep(0.05)  # let the notice paint
+            self._cancel.set()
+            wait = max(self._capture_duration_s - elapsed, 0) + EXIT_WAIT_S
+            await asyncio.to_thread(self._done.wait, wait)
+        self.exit()
 
     # -- rendering --------------------------------------------------------
     def _cstatus(self):
@@ -160,8 +265,11 @@ class GsoApp(App):
             ]
         )
         self.query_one("#header", Static).update(header)
+        mark = f" {CAPTURING}" if self._capture_running else ""
         for wid, label, metric in _BARS:
-            self.query_one(f"#{wid}", Static).update(f"{label:<{_LABEL_W}}{bar(val(metric))}")
+            tag = mark if metric.startswith("dcgm.") else ""
+            self.query_one(f"#{wid}", Static).update(f"{label:<{_LABEL_W}}{bar(val(metric))}{tag}")
+        self.query_one("#timeline-view", Static).update(timeline_text(self._capture_report))
 
         self.query_one("#proc-table", Static).update(
             self._process_text(recs, cst, now, mps_state == "ON")
@@ -172,10 +280,18 @@ class GsoApp(App):
     def _process_text(self, recs: list[Record], cst, now: int, mps_on: bool) -> str:
         names = dict(cst.process_names) if cst is not None else {}
         rows = process_rows(recs, names, now, self._max_age_ns)
-        ctx = "N/A (MPS)" if mps_on else NA
-        lines = [f"{'PID':<8}{'PROCESS':<18}{'SM UTIL':>8}{'VRAM':>8}  {'CTX SW/s'}"]
+        rates = self._ctx_rates() if not mps_on else {}
+        note = ""
+        if self._capture_report is not None and not mps_on:
+            note = f" ({capture_label(self._capture_report)})"
+        lines = [f"{'PID':<8}{'PROCESS':<18}{'SM UTIL':>8}{'VRAM':>8}  CTX SW/s{note}"]
         for r in rows:
             sm = NA if r.sm_util is None else f"{r.sm_util:.0f}%"
+            if mps_on:
+                ctx = "N/A (MPS)"
+            else:
+                rate = rates.get(r.pid)
+                ctx = NA if rate is None else f"{rate:.1f}"
             lines.append(
                 f"{r.pid:<8}{r.name[:17]:<18}{sm:>8}{fmt_vram(r.vram_mib):>8}  {ctx}"
             )
@@ -183,6 +299,12 @@ class GsoApp(App):
             seen = latest(recs, "gpu.util", None, now_ns=now, max_age_ns=self._max_age_ns)
             lines.append("(no GPU processes)" if seen is not None else NA)
         return "\n".join(lines)
+
+    def _ctx_rates(self) -> dict[int, float | None]:
+        if self._capture_report is None:
+            return {}
+        pcs = self._capture_report.summary.get("ctx", {}).get("per_context", [])
+        return {pc["pid"]: pc["restores_per_s"] for pc in pcs if pc.get("pid") is not None}
 
     def _series(self, recs: list[Record], metric: str, now: int, width: int) -> list[float | None]:
         out: list[float | None] = [None] * width
@@ -207,6 +329,12 @@ class GsoApp(App):
 
     def _status_text(self, cst, now: int) -> str:
         parts: list[str] = []
+        if self._quitting:
+            parts.append("waiting for capture to finish…")
+        elif self._capture_running:
+            parts.append(f"capture running… {int(time.monotonic() - self._capture_started)} s")
+        elif self._capture_error:
+            parts.append(f"capture: {self._capture_error}")
         if self._notice is not None and now < self._notice[1]:
             parts.append(self._notice[0])
         dcgm_err = None

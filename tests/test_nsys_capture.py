@@ -420,3 +420,30 @@ def test_default_runner_does_not_wait_for_or_signal_surviving_background_process
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
+
+
+def test_cancellable_runner_kills_own_group_and_raises(tmp_path):
+    import threading
+    import time
+
+    from gso.trace.nsys_capture import CaptureCancelled, cancellable_runner
+
+    cancel = threading.Event()
+    run = cancellable_runner(cancel)
+    threading.Timer(0.3, cancel.set).start()
+    t0 = time.monotonic()
+    with pytest.raises(CaptureCancelled):
+        run(["sleep", "30"], capture_output=True, text=True, timeout=60)
+    assert time.monotonic() - t0 < 5
+
+
+def test_cancellable_runner_normal_and_timeout():
+    import subprocess
+    import threading
+
+    from gso.trace.nsys_capture import cancellable_runner
+
+    run = cancellable_runner(threading.Event())
+    assert run(["true"], capture_output=True, text=True, timeout=5).returncode == 0
+    with pytest.raises(subprocess.TimeoutExpired):
+        run(["sleep", "30"], capture_output=True, text=True, timeout=0.5)

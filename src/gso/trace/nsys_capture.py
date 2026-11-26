@@ -14,6 +14,7 @@ CPU 샘플링과 OS 스레드 추적은 끈다(perf_event_paranoid 때문에 비
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import signal
 import subprocess
@@ -30,6 +31,7 @@ MAX_DURATION_S = 10
 PROFILE_TIMEOUT_MARGIN_S = 60
 EXPORT_TIMEOUT_S = 120
 _TAIL_LINES = 5
+_CANCEL_POLL_S = 0.2
 _SIGTERM_EXIT = 143  # 128 + SIGTERM
 _NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
@@ -40,6 +42,10 @@ class CaptureUnavailable(Exception):
 
 class CaptureError(Exception):
     """nsys가 실행됐지만 실패했다(종료 코드, 시간 초과, 출력 파일 없음)."""
+
+
+class CaptureCancelled(Exception):
+    """다른 스레드가 ``cancellable_runner``의 취소 이벤트를 세워 캡처를 중단했다."""
 
 
 @dataclass(frozen=True)
@@ -107,7 +113,24 @@ def build_export_command(nsys: str, rep: Path, sqlite: Path) -> list[str]:
 # 정상 반환에서는 그룹에 신호를 보내지 않는다(--kill=none으로 살려 둔 대상이 계속 실행된다).
 # 출력은 파이프 대신 임시 파일로 받는다: 살아남은 대상이 상속한 파이프를 계속 잡고 있으면
 # communicate()가 EOF를 기다리며 nsys가 끝난 뒤에도 돌아오지 않기 때문이다.
-def _run_in_group(argv, *, capture_output=True, text=True, timeout=None, env=None, errors="replace"):
+def _wait_cancellable(proc, timeout, cancel, argv) -> None:
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        if cancel.is_set():
+            raise CaptureCancelled("capture cancelled")
+        left = None if deadline is None else deadline - time.monotonic()
+        if left is not None and left <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        try:
+            proc.wait(timeout=_CANCEL_POLL_S if left is None else min(_CANCEL_POLL_S, left))
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _run_in_group(
+    argv, *, capture_output=True, text=True, timeout=None, env=None, errors="replace", cancel=None
+):
     with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
         proc = subprocess.Popen(
             argv,
@@ -123,7 +146,10 @@ def _run_in_group(argv, *, capture_output=True, text=True, timeout=None, env=Non
                 os.killpg(pgid, sig)
 
         try:
-            proc.wait(timeout=timeout)
+            if cancel is None:
+                proc.wait(timeout=timeout)
+            else:
+                _wait_cancellable(proc, timeout, cancel, argv)
         except BaseException:  # TimeoutExpired, KeyboardInterrupt 포함
             kill_group(signal.SIGTERM)
             try:
@@ -140,6 +166,13 @@ def _run_in_group(argv, *, capture_output=True, text=True, timeout=None, env=Non
             if text:
                 out, err = out.decode(errors=errors), err.decode(errors=errors)
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def cancellable_runner(cancel):
+    """기본 runner와 같되, 다른 스레드가 ``cancel``(threading.Event)을 세우면 자신이 만든
+    프로세스 그룹을 종료하고 ``CaptureCancelled``를 일으킨다. ``capture(run=...)``에 넘긴다.
+    ``capture``는 그 예외에서도 이번 호출이 만든 파일을 지우고 다시 던진다."""
+    return functools.partial(_run_in_group, cancel=cancel)
 
 
 def _tail(*streams) -> str:
