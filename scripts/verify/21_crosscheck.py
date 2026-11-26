@@ -3,6 +3,10 @@
 
 Usage: uv run python scripts/verify/21_crosscheck.py <capture.sqlite> --gpu N
 
+The window-rule comparison restates the documented rule (weak evidence) and the raw_counts
+comparison is a low-value consistency check; the counts, sums and first/last values are the
+substantive ones.
+
 Every comparison puts a number computed here with plain SQL (written from
 docs/verification/nsys-schema.md, section 2-5 and 10) next to the number gso reports.
 Exit 0 if all match, 1 otherwise. PIDs are never printed (processes are labelled A, B, ...
@@ -129,21 +133,29 @@ def run(path: Path, gpu: int) -> list[tuple[str, object, object, bool]]:
                     )
                     rows.append((f"GPU {gpu} ctx, {nm}: {tname} (tag {tag}) count", sql.get((pid, tag), 0), got))
 
+            # Rate numerator: tag 8 with 0 <= timestamp < w1. The half-open end follows the
+            # [t0, t1) definition in gso.analysis.intervals (an event exactly at w1 is not counted).
+            bounded = {
+                pid: n for pid, n in c.execute(
+                    f"SELECT {PID}, COUNT(*) FROM GPU_CONTEXT_SWITCH_EVENTS WHERE gpuId = ?"
+                    " AND tag = 8 AND globalPid != ? AND timestamp >= 0 AND timestamp < ?"
+                    " GROUP BY 1", (gpu, MASKED, w1))
+            }
             secs = w1 / 1e9
-            rps = restores_per_second(events, 0, w1) if w1 > 0 else {}
+            gw0, gw1 = capture_window(path)
+            rps = restores_per_second(events, gw0, gw1) if gw1 > gw0 else {}
             for pid in keys:
                 if pid is None:
                     continue
-                exp = sql.get((pid, 8), 0) / secs if secs > 0 else None
+                exp = bounded.get(pid, 0) / secs if secs > 0 else None
                 got = next((v for (g, gp), v in rps.items() if g == gpu and (gp >> 24) & 0xFFFFFF == pid), None)
                 rows.append((f"GPU {gpu} restores/s, process {label(pid)} (window {secs:.3f} s)", exp, got))
             rows.append(("capture window w1 ns", w1, capture_window(path)[1]))
 
         summ = build_summary(path, gpu=gpu, mode="launched" if has_k else "global", masked=True)
-        for t in READ_TABLES:
-            if t in tabs:
-                n = c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-                rows.append((f"report raw_counts: {t}", n, summ["raw_counts"].get(t)))
+        for t in sorted(tabs & set(READ_TABLES), key=READ_TABLES.index):
+            n = c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            rows.append((f"report raw_counts: {t}", n, summ["raw_counts"].get(t)))
         for t in summ["raw_counts"]:
             if t not in tabs:
                 rows.append((f"report raw_counts: {t} (not in file)", None, summ["raw_counts"][t]))

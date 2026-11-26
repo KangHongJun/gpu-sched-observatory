@@ -2,7 +2,9 @@
 
 The SQL below is written from docs/verification/nsys-schema.md (sections 2-5, 10), not from the
 loader. It opens the fixture read-only and never touches PROCESSES. These show gso reads the same
-rows nsys exported; they do not validate the scheduling interpretation.
+rows nsys exported; they do not validate the scheduling interpretation. The window-rule comparison
+restates the documented rule (weaker evidence); the raw_counts comparison is a low-value
+consistency check.
 """
 
 import sqlite3
@@ -111,21 +113,81 @@ def test_capture_window_matches_independent_rule(path):
     assert capture_window(path) == (0, _window_w1(path))
 
 
+def _expected_rates(path):
+    """SQL tag-8 count with 0 <= timestamp < w1 per (gpuId, pid), divided by the window seconds.
+
+    The half-open end follows the [t0, t1) definition in gso.analysis.intervals.
+    """
+    w1 = _window_w1(path)
+    rows = sql(
+        path,
+        f"SELECT gpuId, {PID}, COUNT(*) FROM {CTX} WHERE tag = 8 AND globalPid != {MASKED}"
+        " AND timestamp >= 0 AND timestamp < ? GROUP BY 1, 2",
+        (w1,),
+    )
+    return {(g, p): n / (w1 / 1e9) for g, p, n in rows}
+
+
+def _gso_rates(path):
+    rps = restores_per_second(load_ctx_events(path), *capture_window(path))
+    return {(g, (gp >> 24) & 0xFFFFFF): v for (g, gp), v in rps.items()}
+
+
 @fixtures
 def test_restores_per_second_equals_sql_count_over_window(path):
-    w1 = _window_w1(path)
-    events = load_ctx_events(path)
-    rps = restores_per_second(events, 0, w1)
-    expected = {
-        (gpu, pid): n / (w1 / 1e9)
-        for (gpu, pid, tag), n in _ctx_counts(path).items()
-        if tag == 8 and pid is not None
-    }
+    expected = _expected_rates(path)
     assert expected
-    got = {(g, (gp >> 24) & 0xFFFFFF): v for (g, gp), v in rps.items()}
+    got = _gso_rates(path)
     assert got.keys() == expected.keys()
     for k, v in expected.items():
         assert got[k] == pytest.approx(v, rel=1e-12)
+
+
+def _synthetic(path, events, stopped_at=None):
+    """Hand-built export: (tag, globalPid, gpuId, timestamp) rows, optional stopped row."""
+    con = sqlite3.connect(path)
+    con.executescript(
+        f"CREATE TABLE {CTX} (tag INTEGER NOT NULL, vmId INTEGER NOT NULL, seqNo INTEGER NOT NULL,"
+        " contextId INTEGER NOT NULL, timestamp INTEGER NOT NULL, globalPid INTEGER, gpuId INTEGER);"
+        "CREATE TABLE ENUM_GPU_CTX_SWITCH (id INTEGER PRIMARY KEY, name TEXT, label TEXT);"
+        "INSERT INTO ENUM_GPU_CTX_SWITCH VALUES (7,'SAVE_END','Save end'),(8,'RESTORE_START','x');"
+        "CREATE TABLE DIAGNOSTIC_EVENT (timestamp INTEGER, text TEXT);"
+    )
+    for i, (tag, gpid, gpu, ts) in enumerate(events):
+        con.execute(f"INSERT INTO {CTX} VALUES (?, 0, ?, 1, ?, ?, ?)", (tag, i, ts, gpid, gpu))
+    if stopped_at is not None:
+        con.execute("INSERT INTO DIAGNOSTIC_EVENT VALUES (?, 'Profiling has stopped.')", (stopped_at,))
+    con.commit()
+    con.close()
+    return path
+
+
+GP = 4242 << 24  # a decoded pid for the hand-built rows (schema 2.2)
+SEC = 1_000_000_000
+
+
+def _check_synthetic(path, expected_count, expected_w1):
+    assert _window_w1(path) == expected_w1
+    assert capture_window(path) == (0, expected_w1)
+    exp = _expected_rates(path)
+    assert exp == {(1, 4242): expected_count / (expected_w1 / 1e9)}
+    got = _gso_rates(path)
+    assert got.keys() == exp.keys()
+    assert got[(1, 4242)] == pytest.approx(exp[(1, 4242)], rel=1e-12)
+
+
+def test_window_end_with_stopped_row_counts_event_at_w1_minus_1ns(tmp_path):
+    w1 = 3 * SEC
+    ev = [(8, GP, 1, t) for t in (SEC // 2, 2 * SEC + SEC // 2, w1 - 1)]
+    path = _synthetic(tmp_path / "a.sqlite", ev, stopped_at=w1)
+    _check_synthetic(path, 3, w1)
+
+
+def test_window_end_without_stopped_row_excludes_event_exactly_at_w1(tmp_path):
+    w1 = 3 * SEC  # no stopped row: w1 is the last event itself
+    ev = [(8, GP, 1, t) for t in (SEC, 2 * SEC + SEC // 2, w1)]
+    path = _synthetic(tmp_path / "b.sqlite", ev)
+    _check_synthetic(path, 2, w1)
 
 
 @fixtures
@@ -151,3 +213,15 @@ def test_crosscheck_script_exits_zero_and_prints_no_pid(path):
     assert "comparisons match" in res.stdout
     for pid in pids:
         assert pid not in res.stdout
+
+
+def test_crosscheck_script_on_masked_only_gpu_prints_only_masked_labels():
+    path = FIX / "nsys_ctxsw_min.sqlite"
+    res = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "verify" / "21_crosscheck.py"), str(path), "--gpu", "0"],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "GPU 0 ctx, masked:" in res.stdout
+    assert "process " not in res.stdout
+    assert "restores/s" not in res.stdout
