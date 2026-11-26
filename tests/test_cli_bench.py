@@ -76,7 +76,10 @@ def test_options_are_parsed(spy, tmp_path):
     [["--reps", "2"], ["--duration", "0"], ["--duration", "-3"], ["--warmup", "0"],
      ["--profile", "--duration", "19"], ["--conditions", "mps_99"],
      ["--a-args", "--gpu 1"], ["--b-args", "--out x"], ["--a-args", "--start-at 5"],
-     ["--a-args", "'unterminated"], ["--setup-budget", "0"]],
+     ["--a-args", "'unterminated"], ["--setup-budget", "0"],
+     ["--a-args", "--gp 1"], ["--b-args", "--gpu=1"], ["--a-args", "--dur 5"],
+     ["--b-args", "--start 0"], ["--a-args", "--out=x"], ["--b-args", "--duration=5"],
+     ["--a-args", "--start-at=5"]],
 )
 def test_invalid_arguments_exit_2_and_launch_nothing(spy, tmp_path, extra):
     with pytest.raises(SystemExit) as e:
@@ -144,3 +147,27 @@ def test_summary_line_names_outcome_and_results(spy, tmp_path, capsys):
     cli.main(_bench(tmp_path))
     err = capsys.readouterr().err
     assert "incomplete" in err and "1 repetition(s) failed" in err and "results.jsonl" in err
+
+
+def test_non_reserved_workload_option_still_passes(spy, tmp_path):
+    assert cli.main(_bench(tmp_path, "--a-args", "--size 2048", wa="fp16_matmul")) == 0
+    assert spy.calls[0][1]["a_args"] == ["--size", "2048"]
+
+
+def test_gpu_not_present_is_a_usage_error(spy, tmp_path, capsys):
+    spy.caps.gpus = [SimpleNamespace(index=0, name="x", driver="1")]
+    assert cli.main(_bench(tmp_path)) == 2
+    assert "GPU 2" in capsys.readouterr().err and spy.calls == []
+
+
+def test_error_outcome_exits_4_with_message(spy, tmp_path, capsys):
+    spy.status, spy.message = "error", "ValueError: boom"
+    assert cli.main(_bench(tmp_path)) == 4
+    assert "boom" in capsys.readouterr().err
+
+
+def test_dcgm_provenance_goes_to_env_info(spy, tmp_path):
+    spy.caps.dcgm.reason = "ok"
+    cli.main(_bench(tmp_path))
+    ei = spy.calls[0][1]["env_info"]
+    assert ei["dcgm_available"] is True and ei["dcgm_reason"] == "ok"

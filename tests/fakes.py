@@ -74,6 +74,9 @@ class FakeNvml:
         enc: float | dict = 4,
         dec: float | dict = 2,
         proc_util: dict | None = None,
+        sm_clock: float | dict = 1500,
+        power_limit_mw: float | dict = 230000,
+        pstate: int | dict = 8,
     ):
         if gpus is None:
             gpus = [{}]
@@ -91,6 +94,9 @@ class FakeNvml:
         self.enc = enc
         self.dec = dec
         self.proc_util = proc_util or {}
+        self.sm_clock = sm_clock
+        self.power_limit_mw = power_limit_mw
+        self.pstate = pstate
         self.calls: list[str] = []
         self.proc_util_args: list[int] = []
 
@@ -179,6 +185,18 @@ class FakeNvml:
     def nvmlDeviceGetTemperature(self, handle, sensor):
         self._enter("nvmlDeviceGetTemperature", handle)
         return self._per_gpu(self.temp, handle)
+
+    def nvmlDeviceGetClockInfo(self, handle, clock_type):
+        self._enter("nvmlDeviceGetClockInfo", handle)
+        return self._per_gpu(self.sm_clock, handle)
+
+    def nvmlDeviceGetEnforcedPowerLimit(self, handle):
+        self._enter("nvmlDeviceGetEnforcedPowerLimit", handle)
+        return self._per_gpu(self.power_limit_mw, handle)
+
+    def nvmlDeviceGetPerformanceState(self, handle):
+        self._enter("nvmlDeviceGetPerformanceState", handle)
+        return self._per_gpu(self.pstate, handle)
 
     def nvmlDeviceGetEncoderUtilization(self, handle):
         self._enter("nvmlDeviceGetEncoderUtilization", handle)

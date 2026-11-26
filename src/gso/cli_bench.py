@@ -25,8 +25,10 @@ from gso.capability import detect
 
 EXIT_USAGE = 2
 EXIT_ABORTED = 3
+EXIT_ERROR = 4
 EXIT_INTERRUPTED = 130
-_EXIT = {"complete": 0, "incomplete": 1, "aborted": EXIT_ABORTED, "interrupted": EXIT_INTERRUPTED}
+_EXIT = {"complete": 0, "incomplete": 1, "aborted": EXIT_ABORTED, "error": EXIT_ERROR,
+         "interrupted": EXIT_INTERRUPTED}
 _RESERVED = ("--gpu", "--duration", "--out", "--start-at")  # the runner owns these
 
 _EPILOG = (
@@ -37,7 +39,7 @@ _EPILOG = (
     "DIR/run.json. The MPS daemon is user-scoped, started per MPS condition and stopped after it;\n"
     "the run aborts if anything else appears on the GPU. Never uses sudo.\n"
     "exit codes: 0 complete  1 incomplete (failed repetitions)  2 usage error\n"
-    "            3 aborted for safety  130 interrupted"
+    "            3 aborted for safety  4 internal error  130 interrupted"
 )
 
 
@@ -99,7 +101,8 @@ def validate(parser: argparse.ArgumentParser, args) -> None:
             toks = shlex.split(getattr(args, attr))
         except ValueError as e:
             parser.error(f"--{attr.replace('_', '-')}: {e}")
-        clash = [t for t in toks if t.split("=")[0] in _RESERVED]
+        # a token that equals OR abbreviates a reserved flag (--gp, --dur, --gpu=1 ...) is refused
+        clash = [t for t in toks if t.startswith("--") and any(r.startswith(t.split("=")[0]) for r in _RESERVED)]
         if clash:
             parser.error(f"--{attr.replace('_', '-')} must not contain {', '.join(clash)} (set by the runner)")
         setattr(args, attr, toks)
@@ -130,11 +133,16 @@ def run(args) -> int:
         print("gso bench: --profile needs nsys, which was not found (set NSYS or put nsys on PATH)", file=err)
         return EXIT_USAGE
     gpu = next((g for g in caps.gpus if g.index == args.gpu), None)
+    if gpu is None:
+        why = f" ({caps.nvml_error})" if caps.nvml_error else ""
+        print(f"gso bench: GPU {args.gpu} was not found{why}; nothing was run", file=err)
+        return EXIT_USAGE
     env_info = {
         "gpu_name": gpu.name if gpu else None,
         "driver_version": gpu.driver if gpu else None,
         "nsys_version": nsys_version(caps.nsys_path) if caps.nsys_path else None,
         "dcgm_available": caps.dcgm.available,
+        "dcgm_reason": getattr(caps.dcgm, "reason", None),
     }
     hooks = Hooks(
         telemetry=NvmlDcgmTelemetry(

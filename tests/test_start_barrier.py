@@ -142,3 +142,94 @@ def test_decode_gate_not_yet_warm():
 def test_decode_gate_missed_when_warmup_ended_after_start_at():
     with pytest.raises(_common.BarrierMissed):
         decode.gate_start([10.0, 20.0], 1, 12.0)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--gp", "0", "--duration", "1"], ["--gpu", "0", "--dur", "1"],
+     ["--gpu", "0", "--duration", "1", "--start", "5"]],
+)
+def test_abbreviated_reserved_flags_are_rejected_by_the_workload_parser(tmp_path, monkeypatch, argv):
+    monkeypatch.setattr(_common, "select_gpu", lambda n: None)
+    with pytest.raises(SystemExit) as e:
+        _common.run_cli("x", "d", lambda p: None, lambda a, s: ([1.0], 1.0, {}),
+                        [*argv, "--out", str(tmp_path / "o.json")])
+    assert e.value.code == 2
+
+
+# ---- decode: deadline follows the barrier, no flat-out decoding before it -----------------------
+
+
+def test_progress_deadline_includes_the_remaining_barrier_wait():
+    assert decode.progress_deadline_s(now=1000.0, start_at=None, duration_s=10) == \
+        decode.WARMUP_S + 10 + 15.0
+    assert decode.progress_deadline_s(now=1000.0, start_at=1060.0, duration_s=10) == \
+        60.0 + decode.WARMUP_S + 10 + 15.0
+    assert decode.progress_deadline_s(now=1100.0, start_at=1060.0, duration_s=10) == \
+        decode.WARMUP_S + 10 + 15.0  # barrier already passed
+
+
+def test_decode_starts_ffmpeg_just_before_the_barrier_not_at_once():
+    lead = decode.WARMUP_S + decode.LEAD_S
+    assert decode.pre_start_delay_s(now=1000.0, start_at=None) == 0.0
+    assert decode.pre_start_delay_s(now=1000.0, start_at=1060.0) == pytest.approx(60.0 - lead)
+    assert decode.pre_start_delay_s(now=1059.0, start_at=1060.0) == 0.0
+
+
+class _FakeQueue:
+    """Single-threaded stand-in for the reader queue: every progress block takes 0.5 s."""
+
+    def __init__(self, fake, n_blocks):
+        self.fake, self.lines = fake, []
+        for i in range(n_blocks):
+            self.lines += [f"frame={(i + 1) * 15}\n", "drop_frames=0\n", "progress=continue\n"]
+
+    def get(self, timeout=None):
+        line = self.lines.pop(0)
+        if line.startswith("progress="):
+            self.fake.now += 0.5
+        return line
+
+
+class _FakeFfmpeg:
+    def __init__(self, fake, spawned):
+        self.stdout = self.stderr = iter(())
+        spawned.append(fake.now)
+
+    def poll(self):
+        return 0
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def _decode_run(monkeypatch, fake, start_at, duration, n_blocks):
+    spawned = []
+    monkeypatch.setattr(decode, "ensure_video", lambda stop: "video.mp4")
+    monkeypatch.setattr(decode.subprocess, "Popen", lambda *a, **k: _FakeFfmpeg(fake, spawned))
+    monkeypatch.setattr(decode, "_start_readers", lambda proc: (_FakeQueue(fake, n_blocks), []))
+    monkeypatch.setattr(decode, "_now", fake.clock)
+    monkeypatch.setattr(_common, "_ctx", _common.RunContext(start_at, fake.clock, fake.sleep))
+    args = type("A", (), {"duration": duration})()
+    res = decode.measure(args, _common.StopFlag())
+    return res, spawned, _common.current().window
+
+
+def test_decode_measure_with_a_barrier_far_beyond_the_old_deadline(monkeypatch):
+    fake = FakeClock(1000.0)
+    # start_at is 60 s away: far beyond WARMUP_S + duration + 15 = 27 s
+    res, spawned, window = _decode_run(monkeypatch, fake, 1060.0, 10.0, n_blocks=60)
+    assert res.iterations > 0
+    assert window[0] >= 1060.0 - 1e-9 and window[1] - window[0] >= 10.0
+    # ffmpeg was started just before the warm-up that ends at the barrier, not at launch time
+    assert spawned[0] >= 1060.0 - decode.WARMUP_S - decode.LEAD_S - 1e-9
+    assert spawned[0] > 1000.0 + 30
+
+
+def test_decode_measure_without_barrier_unchanged(monkeypatch):
+    fake = FakeClock(1000.0)
+    res, spawned, window = _decode_run(monkeypatch, fake, None, 10.0, n_blocks=60)
+    assert spawned[0] == 1000.0 and res.iterations > 0 and window[1] - window[0] >= 10.0

@@ -25,6 +25,7 @@ from pathlib import Path
 
 from gso import __version__
 from gso.bench import pair
+from gso.bench.guard import GuardedSession
 from gso.bench.mps import MpsSession, UnsafeGpuError, ensure_safe
 from gso.bench.pair import ProcResult, ProcSpec
 from gso.bench.rows import build_rows
@@ -42,6 +43,7 @@ PROFILE_S = 10
 MIN_PROFILE_DURATION_S = 20
 PREBUILD_DEADLINE_S = 1800.0
 SERVER_QUERY_AFTER_S = 2.0
+WARM_BASELINE_C = 45.0
 
 
 @dataclass
@@ -118,6 +120,10 @@ class _Run:
         self.done_conditions: list[str] = []
         self.rows_written = 0
         self.base_temp: float | None = None
+        self.static: dict = {}
+        self.launched: set[int] = set()
+        self.cur_session = None
+        self.contamination: list[dict] = []
         self.t_start = hooks.clock()
         self.mono_start = hooks.monotonic()
         self.runs_total = len(self.conditions) * (reps + 1)
@@ -134,7 +140,8 @@ class _Run:
         data = {
             "run_id": self.run_id, "started_at": _iso(self.t_start),
             "ended_at": _iso(self.h.clock()) if status != "running" else None,
-            "status": status, "complete": status == "complete", "message": message,
+            "status": f"error: {message}" if status == "error" else status,
+            "complete": status == "complete", "message": message,
             "gpu": self.gpu, "gpu_name": info.get("gpu_name"),
             "driver_version": info.get("driver_version"), "nsys_version": info.get("nsys_version"),
             "gso_version": __version__,
@@ -144,6 +151,12 @@ class _Run:
             "conditions": [c[0] for c in self.conditions],
             "conditions_completed": self.done_conditions, "rows_written": self.rows_written,
             "failed_reps": self.failed, "warnings": self.warnings,
+            "baseline_temp_c": self.base_temp,
+            "dcgm_available": info.get("dcgm_available"), "dcgm_reason": info.get("dcgm_reason"),
+            "telemetry_errors": list(getattr(self.h.telemetry, "errors", [])),
+            "power_limit_w": self.static.get("power_limit_w"),
+            "perf_state_at_start": self.static.get("perf_state"),
+            "contamination_events": self.contamination,
         }
         tmp = self.out / "run.json.tmp"
         tmp.write_text(json.dumps(data, indent=2) + "\n")
@@ -162,6 +175,31 @@ class _Run:
         if session is not None:
             env.update(session.client_env(pct))
         return env
+
+    def is_own(self, pid: int) -> bool:
+        """Is this compute process ours? Our launched process groups (workload and anything it
+        spawns, e.g. ffmpeg) and the session's daemon/server. A vanished pid cannot be judged and
+        is not counted."""
+        if pid in self.launched:
+            return True
+        try:
+            if os.getpgid(pid) in self.launched:
+                return True
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        s = self.cur_session
+        return s is not None and pid in s.own_daemon_pids
+
+    def end_check(self, session) -> str | None:
+        """Non-aborting ensure_safe after a repetition: the reason it fails, or None."""
+        own = session.own_daemon_pids if session is not None else frozenset()
+        try:
+            self.h.ensure_safe(self.gpu, own_pids=own)
+        except UnsafeGpuError as e:
+            return str(e)
+        return None
 
     def check_safe(self, session) -> None:
         own = session.own_daemon_pids if session is not None else frozenset()
@@ -211,8 +249,10 @@ class _Run:
 
     def run_condition(self, cond, first: bool) -> None:
         name, mps_on, pct_a, pct_b = cond
-        session_cm = self.h.session_factory(self.gpu) if mps_on else contextlib.nullcontext(None)
+        session_cm = (GuardedSession(self.h.session_factory(self.gpu), self.warnings.append)
+                      if mps_on else contextlib.nullcontext(None))
         with session_cm as session:
+            self.cur_session = session
             if not first:
                 self.cooldown()
             self.check_safe(session)
@@ -228,6 +268,8 @@ class _Run:
                 self.say(f"{name} rep {rep}/{self.reps} {self.timing()}")
                 self.measured_rep(name, session, (pct_a, pct_b), rep, timeout, temp)
                 self.runs_done += 1
+            self.cur_session = None
+        self.cur_session = None
         self.done_conditions.append(name)
 
     def timing(self) -> str:
@@ -259,12 +301,31 @@ class _Run:
             return pair.run_procs(
                 specs, launch=self.launch, clock=self.h.clock, sleep=self.h.sleep,
                 deadline_at=start_at + duration + pair.DEADLINE_GRACE_S, actions=actions,
-                killpg=self.h.killpg)
+                killpg=self.h.killpg, on_launch=self.launched.add)
 
     def measured_rep(self, name, session, pcts, rep, timeout, temp) -> None:
         extra: dict = {}
+        t0_ns = int(self.h.clock() * 1e9)
         results = self.run_rep(name, session, pcts, self.duration_s, self.profile, extra)
-        rows = self.rows(name, session, pcts, rep, results, extra, timeout, temp)
+        t1_ns = int(self.h.clock() * 1e9)
+        # Contamination: a foreign process seen during the repetition (per-second sampling) or
+        # present right after it (non-aborting ensure_safe). The rows are still written, marked
+        # unfair, and the run stops afterwards.
+        why_foreign = []
+        n_foreign = self.h.telemetry.foreign_in_window(t0_ns, t1_ns)
+        if n_foreign:
+            why_foreign.append("foreign GPU process during window")
+            self.contamination.append({
+                "condition": name, "rep": rep, "source": "telemetry",
+                "foreign_process_count": n_foreign,
+                "message": f"{n_foreign} foreign compute process(es) seen on GPU {self.gpu}"})
+        end_problem = self.end_check(session)
+        if end_problem is not None:
+            why_foreign.append("foreign GPU process present at end of repetition")
+            self.contamination.append({
+                "condition": name, "rep": rep, "source": "end_check",
+                "foreign_process_count": None, "message": end_problem})
+        rows = self.rows(name, session, pcts, rep, results, extra, timeout, temp, why_foreign)
         self.append_rows(rows)
         if not all(r["ok"] for r in rows):
             self.failed.append({"condition": name, "rep": rep})
@@ -277,21 +338,33 @@ class _Run:
         prof = extra.get("profile")
         if prof and prof.get("error"):
             self.warnings.append(f"{name} rep {rep} profile capture failed: {prof['error']}")
+        if why_foreign:
+            self.warnings.append(f"{name} rep {rep} contaminated: {'; '.join(why_foreign)}")
+            raise _Abort(f"another process is using GPU {self.gpu} ({name} rep {rep} is marked "
+                         "unfair); stopping")
 
-    def rows(self, name, session, pcts, rep, results, extra, timeout, temp) -> list[dict]:
+    def rows(self, name, session, pcts, rep, results, extra, timeout, temp, foreign=()) -> list[dict]:
         return build_rows(
             run_id=self.run_id, condition=name, mps=session is not None, pcts=pcts, rep=rep,
             results=results, extra=extra, cooldown_timeout=timeout, temp_start=temp,
-            duration_s=self.duration_s, profile=self.profile, window_means=self.h.telemetry.window_means)
+            duration_s=self.duration_s, profile=self.profile, window_means=self.h.telemetry.window_means,
+            extra_reasons=foreign)
 
     def execute(self) -> RunOutcome:
-        status, message = "complete", ""
+        status, message = "error", "terminated unexpectedly"
         try:
+            self.h.telemetry.set_own_filter(self.is_own)
             self.h.telemetry.start()
+            self.static = self.h.telemetry.static_info()
+            self.base_temp, _ = self.h.telemetry.probe()  # before any pre-build or warm-up
+            if self.base_temp is not None and self.base_temp >= WARM_BASELINE_C:
+                self.warnings.append(
+                    f"cooldown baseline {self.base_temp:g} C is already >= {WARM_BASELINE_C:g} C: "
+                    "the GPU was warm before this run, so 'cooled down' is relative to a warm start")
             self.prebuild()
-            self.base_temp, _ = self.h.telemetry.probe()
             for i, cond in enumerate(self.conditions):
                 self.run_condition(cond, first=i == 0)
+            status, message = "complete", ""
             if self.failed:
                 status = "incomplete"
                 message = f"{len(self.failed)} repetition(s) failed"
@@ -299,10 +372,10 @@ class _Run:
             status, message = "incomplete", str(e)
         except (_Abort, UnsafeGpuError) as e:
             status, message = "aborted", f"aborted for safety: {e}"
-        except RuntimeError as e:  # MpsSession left a daemon of ours running
-            status, message = "aborted", f"aborted: {e}"
         except KeyboardInterrupt:
             status, message = "interrupted", "interrupted"
+        except Exception as e:  # noqa: BLE001 - recorded, never reported as a complete run
+            status, message = "error", f"{type(e).__name__}: {e}"
         finally:
             with contextlib.suppress(Exception):
                 self.h.telemetry.stop()

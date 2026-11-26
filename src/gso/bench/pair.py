@@ -142,6 +142,7 @@ def run_procs(
     deadline_at: float,
     actions: Sequence[tuple[float, Callable[[], None]]] = (),
     killpg=os.killpg,
+    on_launch: Callable[[int], None] | None = None,
 ) -> list[ProcResult]:
     """Start every spec, run the timed ``actions`` (epoch seconds, blocking callables) while
     waiting, and return one result per spec. If any process fails while another still runs the
@@ -159,6 +160,8 @@ def run_procs(
                     stdout=subprocess.DEVNULL, stderr=err, start_new_session=True,
                 )
                 groups.append(Group(spec, proc, err))
+                if on_launch is not None:
+                    on_launch(proc.pid)
             while True:
                 codes = [g.proc.poll() for g in groups]
                 if all(c is not None for c in codes):

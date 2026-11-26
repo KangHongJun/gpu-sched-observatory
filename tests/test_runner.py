@@ -15,7 +15,7 @@ from tests.fakes import FakeTime
 T0 = 1_000_000.0
 GPU = 2
 MEANS = {
-    "power_w_mean": 111.0, "sm_active_mean": 50.0, "sm_occupancy_mean": 20.0,
+    "sm_clock_mhz_mean": 1500.0, "power_w_mean": 111.0, "sm_active_mean": 50.0, "sm_occupancy_mean": 20.0,
     "tensor_active_mean": 1.0, "dram_active_mean": 5.0,
 }
 ROW_KEYS = {
@@ -24,7 +24,7 @@ ROW_KEYS = {
     "fps_p5", "frames_dropped", "backend", "build_s", "mps", "client_thread_pct_requested",
     "mps_server_active_thread_pct", "window_start_ns", "window_end_ns", "window_overlap_s",
     "fair", "fair_reason", "cooldown_timeout", "gpu_temp_start_c", "power_w_mean",
-    "sm_active_mean", "sm_occupancy_mean", "tensor_active_mean", "dram_active_mean", "profiled",
+    "sm_active_mean", "sm_occupancy_mean", "tensor_active_mean", "dram_active_mean", "sm_clock_mhz_mean", "profiled",
     "ctx_switch_rate", "ctx_switch_note", "overlap",
 }
 
@@ -143,7 +143,12 @@ class FakeSession:
 
 
 class FakeTelemetry:
-    def __init__(self, probe_fn=None, means=None):
+    def __init__(self, probe_fn=None, means=None, events=None, foreign=None):
+        self.events = events if events is not None else []
+        self.foreign = foreign or (lambda n: 0)  # n-th foreign_in_window call -> count
+        self.foreign_calls = []
+        self.own_filter = None
+        self.errors = ["DCGM: fake warning"]
         self.probe_fn = probe_fn or (lambda n: (40.0, 0.0))
         self.means = MEANS if means is None else means
         self.probes = 0
@@ -158,7 +163,19 @@ class FakeTelemetry:
 
     def probe(self):
         self.probes += 1
+        if self.probes == 1:
+            self.events.append(("probe",))  # the baseline reading
         return self.probe_fn(self.probes)
+
+    def set_own_filter(self, fn):
+        self.own_filter = fn
+
+    def foreign_in_window(self, start_ns, end_ns):
+        self.foreign_calls.append((start_ns, end_ns))
+        return self.foreign(len(self.foreign_calls))
+
+    def static_info(self):
+        return {"power_limit_w": 230.0, "perf_state": "P8"}
 
     def window_means(self, start_ns, end_ns):
         self.windows.append((start_ns, end_ns))
@@ -167,14 +184,14 @@ class FakeTelemetry:
 
 class Rig:
     def __init__(self, tmp_path, behavior=None, refuse_at=None, probe_fn=None, means=None,
-                 environ=None, profiler=None, query_pct=100.0):
+                 environ=None, profiler=None, query_pct=100.0, foreign=None):
         self.time = FakeTime()
         self.time.now = T0
         self.events = []
         self.launcher = FakeLauncher(self.time, self.events, behavior)
         self.safe_calls = []
         self.refuse_at = refuse_at
-        self.telemetry = FakeTelemetry(probe_fn, means)
+        self.telemetry = FakeTelemetry(probe_fn, means, self.events, foreign)
         self.sessions = []
         self.queries = []
         self.progress = []
@@ -363,18 +380,19 @@ def test_one_session_per_mps_condition_around_warmup_and_reps(rig):
 def test_ensure_safe_before_every_warmup_and_rep_with_right_own_pids(rig):
     rig.run(conditions=["mps_off", "mps_50_50"])
     # per condition: 1 warm-up + 3 reps
-    assert len(rig.safe_calls) == 8
+    # per condition: before the warm-up, before each rep and (non-aborting) after each rep
+    assert len(rig.safe_calls) == 14
     assert all(g == GPU for g, _ in rig.safe_calls)
-    assert [own for _, own in rig.safe_calls[:4]] == [frozenset()] * 4
-    assert [own for _, own in rig.safe_calls[4:]] == [frozenset({9001, 9002})] * 4
+    assert [own for _, own in rig.safe_calls[:7]] == [frozenset()] * 7
+    assert [own for _, own in rig.safe_calls[7:]] == [frozenset({9001, 9002})] * 7
     # each launch pair is immediately preceded by a safe check
     flat = [e[0] for e in rig.events if e[0] in ("safe", "launch")]
     pairs = "".join("S" if k == "safe" else "L" for k in flat)
-    assert pairs == "SLL" * 8
+    assert pairs == ("SLL" + "SLLS" * 3) * 2
 
 
 def test_safety_refusal_aborts_whole_run_keeps_rows_and_exits_session(rig):
-    rig.refuse_at = 7  # 2nd rep of the 2nd condition (mps_off: 4 checks, mps_100_100: 3rd = warm-up+rep2)
+    rig.refuse_at = 11  # mps_off: 7 checks; mps_100_100: warm-up 8, rep 1 9+10, rep 2 pre-check 11
     out = rig.run(conditions=["mps_off", "mps_100_100", "mps_50_50"])
     assert out.status == "aborted" and not out.complete
     assert "another user's process" in out.message
@@ -615,7 +633,8 @@ def test_trt_prebuild_once_before_any_measured_rep(tmp_path, monkeypatch):
     assert _arg(pre.argv, "--gpu") == str(GPU) and "--batch" in pre.argv
     assert not [k for k in _env_of(pre) if k.startswith("CUDA_MPS_")]
     assert sum(1 for p in procs if p.start_at is None) == 1
-    assert r.events[0][0] == "safe" and r.events[1][0] == "launch"
+    kinds = [e[0] for e in r.events if e[0] != "probe"]
+    assert kinds[0] == "safe" and kinds[1] == "launch"
     assert len(r.rows()) == 12
 
 
@@ -795,3 +814,126 @@ def test_progress_lines_name_condition_rep_and_eta(rig):
     rig.run(conditions=["mps_off"])
     text = "\n".join(rig.progress)
     assert "mps_off" in text and "rep 1/3" in text and "ETA" in text and "elapsed" in text
+
+
+# ---- fix round 1 ------------------------------------------------------------------------------
+
+
+def test_foreign_process_at_end_of_rep_makes_that_rep_unfair_then_aborts(rig):
+    rig.refuse_at = 5  # warm-up 1; rep 1: 2, 3; rep 2: pre 4, post 5
+    out = rig.run(conditions=["mps_off"])
+    assert out.status == "aborted" and not out.complete
+    rows = rig.rows()
+    assert len(rows) == 4  # rep 3 never ran
+    assert all(r["fair"] for r in rows[:2])
+    assert all(r["fair"] is False and "end of repetition" in r["fair_reason"] for r in rows[2:])
+    assert all(r["ok"] for r in rows[2:])  # the measurement itself worked; it is just not trusted
+    ev = rig.run_json()["contamination_events"]
+    assert ev[0]["condition"] == "mps_off" and ev[0]["rep"] == 2 and ev[0]["source"] == "end_check"
+    assert rig.run_json()["status"] == "aborted"
+
+
+def test_last_repetition_is_checked_too(rig):
+    rig.refuse_at = 7  # post check of rep 3
+    out = rig.run(conditions=["mps_off"])
+    rows = rig.rows()
+    assert out.status == "aborted" and len(rows) == 6
+    assert [r["fair"] for r in rows] == [True] * 4 + [False] * 2
+
+
+def test_foreign_process_seen_during_window_makes_rep_unfair_then_aborts(tmp_path):
+    r = Rig(tmp_path, foreign=lambda n: 2 if n == 2 else 0)
+    out = r.run(conditions=["mps_off"])
+    rows = r.rows()
+    assert out.status == "aborted" and len(rows) == 4
+    assert all(x["fair"] is False and "foreign GPU process during window" in x["fair_reason"]
+               for x in rows[2:])
+    ev = r.run_json()["contamination_events"]
+    assert ev == [{"condition": "mps_off", "rep": 2, "source": "telemetry",
+                   "foreign_process_count": 2, "message": ev[0]["message"]}]
+    assert "pid" not in json.dumps(r.run_json()).lower().replace("pids", "")
+
+
+def test_telemetry_gets_an_own_process_filter(rig):
+    rig.run(conditions=["mps_off"], reps=3)
+    assert callable(rig.telemetry.own_filter)
+    assert rig.telemetry.own_filter(1) is False  # init is not ours
+    # the window checked spans the whole repetition (setup budget + measured window)
+    s, e = rig.telemetry.foreign_calls[0]
+    assert (e - s) / 1e9 >= 60 + 30
+
+
+def test_unexpected_exception_is_an_error_not_a_complete_run(rig):
+    def boom(a, b):
+        raise ValueError("boom")
+
+    rig.telemetry.window_means = boom
+    out = rig.run(conditions=["mps_off"])
+    assert out.status == "error" and "ValueError: boom" in out.message and not out.complete
+    rj = rig.run_json()
+    assert rj["complete"] is False and rj["status"] == "error: ValueError: boom"
+    assert rig.telemetry.stopped == 1
+
+
+def test_baseline_temperature_taken_before_prebuild_and_warned_when_warm(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "WORKLOADS", ("small_kernels", "trt_infer"))
+    r = Rig(tmp_path, probe_fn=lambda n: (47.0, 0.0))
+    r.run(wa="trt_infer", wb="small_kernels", conditions=["mps_off"])
+    kinds = [e[0] for e in r.events]
+    assert kinds.index("probe") < kinds.index("launch")
+    rj = r.run_json()
+    assert rj["baseline_temp_c"] == 47.0
+    assert any("baseline" in w and "45" in w for w in rj["warnings"])
+
+
+def test_cool_baseline_has_no_warning(rig):
+    rig.run(conditions=["mps_off"])
+    rj = rig.run_json()
+    assert rj["baseline_temp_c"] == 40.0
+    assert not any("baseline" in w for w in rj["warnings"])
+
+
+def test_run_json_records_provenance(rig):
+    rig.run(conditions=["mps_off"], env_info={"dcgm_available": False, "dcgm_reason": "no host engine"})
+    rj = rig.run_json()
+    assert rj["dcgm_available"] is False and rj["dcgm_reason"] == "no host engine"
+    assert rj["telemetry_errors"] == ["DCGM: fake warning"]
+    assert rj["power_limit_w"] == 230.0 and rj["perf_state_at_start"] == "P8"
+    assert all(r["sm_clock_mhz_mean"] == 1500.0 for r in rig.rows())
+
+
+def test_signals_are_deferred_while_the_mps_session_exits(tmp_path):
+    import signal as sg
+
+    r = Rig(tmp_path)
+
+    class Sess(FakeSession):
+        def __exit__(self, *exc):
+            sg.raise_signal(sg.SIGINT)  # Ctrl-C arrives while the daemon is being stopped
+            self.events.append(("exit_done",))
+            return False
+
+    r.hooks.session_factory = lambda gpu: Sess(r.events)
+    out = r.run(conditions=["mps_50_50"])
+    assert ("exit_done",) in r.events  # the stop was not cut short
+    assert out.status == "interrupted"  # and the Ctrl-C is honoured afterwards
+
+
+def test_leftover_daemon_is_recorded_in_run_json_warnings(rig):
+    class Leaky(FakeSession):
+        def __exit__(self, *exc):
+            raise RuntimeError("MPS daemon of this session is still running")
+
+    rig.hooks.session_factory = lambda gpu: Leaky(rig.events)
+    rig.run(conditions=["mps_50_50"])
+    assert any("still running" in w for w in rig.run_json()["warnings"])
+
+
+def test_trt_row_with_unknown_build_time_says_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "WORKLOADS", ("small_kernels", "trt_infer"))
+    r = Rig(tmp_path, behavior=lambda p: {"payload": {"build_s": None}}
+            if p.workload == "trt_infer" and p.duration == 30.0 else {})
+    r.run(wa="trt_infer", wb="small_kernels", conditions=["mps_off"])
+    row = r.rows()[0]
+    assert row["fair"] is False and "build time unknown" in row["fair_reason"]
+    assert "engine built" not in row["fair_reason"]

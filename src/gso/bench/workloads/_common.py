@@ -99,8 +99,12 @@ class RunContext:
         now = self.clock()
         if now > self.start_at:
             raise BarrierMissed(f"start barrier missed by {now - self.start_at:.3f} s")
+        return self.wait_until(self.start_at, stop)
+
+    def wait_until(self, when: float, stop: StopFlag) -> bool:
+        """Sleep (in short slices) until the epoch time ``when``. False if stopped first."""
         while True:
-            left = self.start_at - self.clock()
+            left = when - self.clock()
             if left <= 0:
                 return True
             if stop.is_set():
@@ -216,7 +220,9 @@ def run_cli(
     clock: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
-    parser = argparse.ArgumentParser(description=description)
+    # allow_abbrev=False: the runner's guard on --gpu/--duration/--out/--start-at must not be
+    # bypassable by an abbreviation such as --gp
+    parser = argparse.ArgumentParser(description=description, allow_abbrev=False)
     parser.add_argument("--gpu", type=int, required=True)
     parser.add_argument("--duration", type=float, required=True)
     parser.add_argument("--out", required=True)

@@ -10,6 +10,8 @@ JSON: iterations = 창 안에서 디코드한 프레임 수, throughput_per_s = 
 latency_ms는 p50/p95/p99 모두 null(프레임별 지연을 측정하지 않는다), metric_kind = "throughput_only".
 추가 키: fps, fps_min / fps_p5(0.5초 진행 샘플 구간별 FPS의 최솟값 / 하위 5%, 샘플이 5개 미만이면 null),
 frames_dropped(창 안 drop_frames 증가량, ffmpeg가 보고하지 않았으면 null).
+--start-at: ffmpeg는 워밍업이 start_at 근처에서 끝나도록 start_at - WARMUP_S - LEAD_S에 시작한다(장벽 전에 측정되지 않는
+디코드 부하를 다른 프로세스의 측정 구간에 주지 않는다). 측정 창은 start_at 이후 첫 진행 샘플부터다.
 합성 영상(testsrc2 1920x1080@30, 20초, libx264)은 ~/.cache/gso/에 만들어 재사용한다.
 """
 
@@ -75,6 +77,37 @@ def window_start(points: list[tuple[float, int, int | None]], warmup_s: float) -
         if p[0] >= t0 + warmup_s:
             return i
     return None
+
+
+LEAD_S = 3.0  # ffmpeg start-up and first progress sample, before the warm-up that ends at start_at
+
+
+def _now() -> float:
+    return time.perf_counter()
+
+
+def progress_deadline_s(now: float, start_at: float | None, duration_s: float) -> float:
+    """Seconds (from the ffmpeg start) after which missing progress is an error: the remaining
+    barrier wait plus warm-up, the window and a 15 s margin."""
+    barrier = 0.0 if start_at is None else max(0.0, start_at - now)
+    return barrier + WARMUP_S + duration_s + 15.0
+
+
+def pre_start_delay_s(now: float, start_at: float | None) -> float:
+    """How long to wait before starting ffmpeg so that its warm-up ends near start_at. Decoding
+    flat-out until the barrier would put unmeasured load on the GPU under the other process's
+    measured window; waiting costs nothing because the warm-up is not measured either."""
+    if start_at is None:
+        return 0.0
+    return max(0.0, start_at - WARMUP_S - LEAD_S - now)
+
+
+def _start_readers(proc):
+    q: queue.Queue[str | None] = queue.Queue()
+    err_lines: list[str] = []
+    threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
+    threading.Thread(target=lambda: err_lines.extend(proc.stderr), daemon=True).start()
+    return q, err_lines
 
 
 BARRIER_TOL_S = 1.0  # 진행 샘플 간격(0.5 s)의 두 배
@@ -190,6 +223,10 @@ def _stop_child(proc: subprocess.Popen) -> None:
 def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
     video = ensure_video(stop)
     stop.raise_if_set()
+    ctx = current()
+    delay = pre_start_delay_s(ctx.clock(), ctx.start_at)
+    if delay > 0 and not ctx.wait_until(ctx.clock() + delay, stop):
+        return None
     try:
         proc = subprocess.Popen(  # 환경(CUDA_DEVICE_ORDER/CUDA_VISIBLE_DEVICES)은 상속
             ffmpeg_cmd(video), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
@@ -197,23 +234,17 @@ def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
     except FileNotFoundError as exc:
         raise WorkloadUnavailable("ffmpeg not found") from exc
     try:
-        q: queue.Queue[str | None] = queue.Queue()
-        err_lines: list[str] = []
-        threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
-        threading.Thread(
-            target=lambda: err_lines.extend(proc.stderr), daemon=True
-        ).start()
-        start = time.perf_counter()
-        deadline = WARMUP_S + args.duration + 15.0  # 진행 샘플이 오지 않을 때의 상한
+        q, err_lines = _start_readers(proc)
+        start = _now()
+        deadline = progress_deadline_s(ctx.clock(), ctx.start_at, args.duration)  # 진행 샘플이 오지 않을 때의 상한
         pending: list[str] = []
         points: list[tuple[float, int, int | None]] = []
         walls: list[float] = []  # points[i]가 도착한 벽시계 시각(epoch s)
-        ctx = current()
         i0: int | None = None
         while True:
             if stop.is_set():
                 return None
-            now = time.perf_counter() - start
+            now = _now() - start
             if now > deadline:
                 raise WorkloadUnavailable("ffmpeg produced no progress in time")
             try:
@@ -226,7 +257,7 @@ def measure(args: argparse.Namespace, stop: StopFlag) -> Measured | None:
             pending.append(line)
             if not line.startswith("progress="):
                 continue
-            t = time.perf_counter() - start
+            t = _now() - start
             for block in parse_progress(pending):
                 pt = block_point(t, block)
                 if pt is not None:

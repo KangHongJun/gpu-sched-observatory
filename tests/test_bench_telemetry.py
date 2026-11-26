@@ -60,3 +60,47 @@ def test_dcgm_not_started_when_no_field_is_supported():
     t.start()
     t.stop()
     assert popens == []
+
+
+def test_sm_clock_mean_and_static_info():
+    t = NvmlDcgmTelemetry(0, nvml=FakeNvml(sm_clock=1700, power_limit_mw=230000, pstate=2),
+                          interval_s=0.01)
+    t.start()
+    try:
+        time.sleep(0.12)
+    finally:
+        t.stop()
+    assert t.window_means(0, 2**62)["sm_clock_mhz_mean"] == 1700.0
+    assert t.static_info() == {"power_limit_w": 230.0, "perf_state": "P2"}
+
+
+def test_static_info_none_when_unsupported():
+    nv = FakeNvml(errors={"nvmlDeviceGetEnforcedPowerLimit": FakeNvml.NVMLError_NotSupported,
+                          "nvmlDeviceGetPerformanceState": FakeNvml.NVMLError_NotSupported,
+                          "nvmlDeviceGetClockInfo": FakeNvml.NVMLError_NotSupported})
+    t = NvmlDcgmTelemetry(0, nvml=nv, interval_s=0.01)
+    t.start()
+    time.sleep(0.05)
+    t.stop()
+    assert t.static_info() == {"power_limit_w": None, "perf_state": None}
+    assert t.window_means(0, 2**62)["sm_clock_mhz_mean"] is None
+
+
+def test_foreign_processes_are_counted_never_listed():
+    nv = FakeNvml(procs={0: [111, 222]}, mps_procs={0: [333]})
+    t = NvmlDcgmTelemetry(0, nvml=nv, interval_s=0.01)
+    t.set_own_filter(lambda pid: pid == 111)
+    t.start()
+    time.sleep(0.12)
+    t.stop()
+    assert t.foreign_in_window(0, 2**62) == 2  # 222 and 333
+    assert t.foreign_in_window(0, 1000) == 0  # outside the window
+    assert not any(isinstance(v, int) and v in (222, 333) for v in vars(t).values())
+
+
+def test_no_filter_means_no_foreign_check():
+    t = NvmlDcgmTelemetry(0, nvml=FakeNvml(procs={0: [5]}), interval_s=0.01)
+    t.start()
+    time.sleep(0.05)
+    t.stop()
+    assert t.foreign_in_window(0, 2**62) == 0

@@ -8,10 +8,10 @@ Fields (``null`` = not measured / not applicable, never 0 for unknown):
   mps_server_active_thread_pct (the SERVER setting read through the control pipe),
   window_start_ns, window_end_ns (this process's measured window, epoch ns),
   window_overlap_s (overlap of both windows), fair (False: failed rep, missing window, overlap
-  below 95 % of the duration, or a TensorRT build inside the measured run; applies to BOTH rows
-  of a repetition), fair_reason, cooldown_timeout, gpu_temp_start_c, power_w_mean (W),
+  below 95 % of the duration, a TensorRT build inside the measured run or unknown build time, or
+  a foreign GPU process seen during the repetition; applies to BOTH rows of a repetition), fair_reason, cooldown_timeout, gpu_temp_start_c, power_w_mean (W),
   sm_active_mean, sm_occupancy_mean, tensor_active_mean, dram_active_mean (DCGM %, means over the
-  overlapped window), profiled, ctx_switch_rate (per s, this GPU; null under MPS), ctx_switch_note,
+  overlapped window), sm_clock_mhz_mean (NVML, same window), profiled, ctx_switch_rate (per s, this GPU; null under MPS), ctx_switch_note,
   overlap (always null: global captures have no kernels).
 A failed repetition has ok=false on both rows and null metrics.
 """
@@ -25,11 +25,18 @@ from gso.bench.pair import ProcResult
 
 MIN_OVERLAP = 0.95
 MPS_NOTE = "N/A under MPS: no context-switch events are recorded (decision 4)"
-_MEANS = ("power_w_mean", "sm_active_mean", "sm_occupancy_mean", "tensor_active_mean", "dram_active_mean")
+_MEANS = ("sm_clock_mhz_mean", "power_w_mean", "sm_active_mean", "sm_occupancy_mean", "tensor_active_mean", "dram_active_mean")
 _EXTRA = ("gbps", "fps", "fps_min", "fps_p5", "frames_dropped", "backend", "build_s")
 
 
-def fairness(results: Sequence[ProcResult], duration_s: float) -> tuple[float | None, list[str]]:
+def fairness(
+    results: Sequence[ProcResult], duration_s: float, extra_reasons: Sequence[str] = ()
+) -> tuple[float | None, list[str]]:
+    overlap, reasons = _fairness(results, duration_s)
+    return overlap, [*reasons, *extra_reasons]
+
+
+def _fairness(results: Sequence[ProcResult], duration_s: float) -> tuple[float | None, list[str]]:
     payloads = [r.payload for r in results]
     if any(p is None for p in payloads):
         return None, ["repetition failed"]
@@ -40,15 +47,21 @@ def fairness(results: Sequence[ProcResult], duration_s: float) -> tuple[float | 
     elif overlap < MIN_OVERLAP * duration_s:
         reasons.append(f"window overlap {overlap:.2f} s is below 95 % of {duration_s:g} s")
     for r in results:
-        if r.workload == "trt_infer" and r.payload.get("build_s") != 0:
-            reasons.append(f"trt_infer {r.label} build_s={r.payload.get('build_s')} (engine built in a measured run)")
+        if r.workload != "trt_infer":
+            continue
+        build = r.payload.get("build_s")
+        if build is None:
+            reasons.append(f"trt_infer {r.label} build time unknown (build_s missing)")
+        elif build != 0:
+            reasons.append(f"trt_infer {r.label} build_s={build} (engine built in a measured run)")
     return overlap, reasons
 
 
 def build_rows(*, run_id, condition, mps, pcts, rep, results, extra, cooldown_timeout, temp_start,
-               duration_s, profile, window_means: Callable[[int, int], dict]) -> list[dict]:
+               duration_s, profile, window_means: Callable[[int, int], dict],
+               extra_reasons: Sequence[str] = ()) -> list[dict]:
     ok = all(r.payload is not None for r in results)
-    overlap, reasons = fairness(results, duration_s)
+    overlap, reasons = fairness(results, duration_s, extra_reasons)
     means = dict.fromkeys(_MEANS)
     if overlap is not None:
         payloads = [r.payload for r in results]
