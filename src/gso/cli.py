@@ -256,9 +256,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="no terminal UI: collect for --duration seconds and write --export")
     live.add_argument("--duration", type=_positive_float, default=None, metavar="SECONDS",
                       help="headless run length in seconds (> 0)")
-    from gso import cli_capture
+    from gso import cli_bench, cli_capture
 
     cli_capture.add_parser(sub)
+    cli_bench.add_parser(sub)
     return parser
 
 
@@ -301,6 +302,11 @@ def main(argv: list[str] | None = None, *, sleep=time.sleep, clock=time.monotoni
 
         cli_capture.validate(parser, args, tail)
         return cli_capture.run_capture(args)
+    if args.command == "bench":
+        from gso import cli_bench
+
+        cli_bench.validate(parser, args)
+        return cli_bench.run(args)
     if args.command == "live":
         _validate_live(parser, args)
         if args.headless:
