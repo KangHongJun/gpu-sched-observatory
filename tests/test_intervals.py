@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import sqlite3
 import statistics
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from gso.analysis.intervals import (
     summarize_ns,
     switch_rate,
     switch_rate_by_gpu,
+    switch_rate_is_lower_bound_by_gpu,
     union_length,
 )
 from gso.trace import nsys_sqlite as ns
@@ -96,7 +98,26 @@ def test_same_context_twice_not_a_switch():
 
 def test_masked_is_one_opaque_context():
     assert switch_rate([ev(0, None), ev(S // 4, 1), ev(S // 2, None)], 0, S) == 2.0
-    assert switch_rate([ev(0, None), ev(S // 4, None)], 0, S) == 0.0
+    # changed: masked-only used to be 0.0; several processes may hide behind the mask
+    assert switch_rate([ev(0, None), ev(S // 4, None)], 0, S) is None
+    assert switch_rate_by_gpu([ev(0, None), ev(S // 4, None)], 0, S) == {0: None}
+
+
+def test_masked_only_gpu_is_unknown_and_excluded_from_total():
+    e = [ev(0, None, gpu=0), ev(10, None, gpu=0), ev(0, 1, gpu=1), ev(S // 2, 2, gpu=1)]
+    assert switch_rate_by_gpu(e, 0, S) == {0: None, 1: 1.0}
+    assert switch_rate(e, 0, S) == 1.0
+    assert switch_rate_is_lower_bound_by_gpu(e, 0, S) == {0: True, 1: False}
+
+
+def test_mixed_gpu_is_number_and_lower_bound():
+    e = [ev(0, 1), ev(10, None), ev(20, None), ev(30, 1)]
+    # masked->masked is not counted: 1->M, M->1 = 2 switches
+    assert switch_rate_by_gpu(e, 0, S) == {0: 2.0}
+    assert switch_rate_is_lower_bound_by_gpu(e, 0, S) == {0: True}
+    assert switch_rate_is_lower_bound_by_gpu(e, 0, 0) == {}
+    assert switch_rate_is_lower_bound_by_gpu([ev(0, 1)], 0, S) == {0: False}
+    assert switch_rate_is_lower_bound_by_gpu([ev(0, None, tag=7)], 0, S) == {}
 
 
 def test_first_restore_per_gpu_is_not_a_switch():
@@ -198,6 +219,7 @@ def test_union_and_slices_unsorted_touching_duplicates():
     assert slice_durations(iv) == [15, 10, 1]
     assert union_length([]) == 0
     assert slice_durations([]) == []
+    assert slice_durations([(5, 5), (10, 12)]) == [2]  # zero-length input dropped
 
 
 def test_residency_clips_and_empty():
@@ -272,7 +294,23 @@ def test_real_global_capture():
     events = ns.load_ctx_events(CTXSW)
     r = restores_per_second(events, *w)
     assert len([k for k in r if k[0] == 1]) == 2
-    assert switch_rate_by_gpu(events, *w)[1] > 0
+    by_gpu = switch_rate_by_gpu(events, *w)
+    # independent check of which GPUs have only masked RESTORE_START rows
+    con = sqlite3.connect(f"file:{CTXSW}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "SELECT gpuId, SUM(globalPid = ?), SUM(globalPid != ?) "
+            "FROM GPU_CONTEXT_SWITCH_EVENTS WHERE tag = 8 GROUP BY gpuId",
+            (MASK, MASK),
+        ).fetchall()
+    finally:
+        con.close()
+    masked_only = {g for g, m, n in rows if m and not n}
+    assert 0 in masked_only and 1 not in masked_only
+    assert by_gpu[0] is None
+    assert by_gpu[1] > 0
+    lb = switch_rate_is_lower_bound_by_gpu(events, *w)
+    assert lb[0] is True and lb[1] is False
     sums = {}
     for cons in ("restore_save", "hold"):
         ivs = ns.ctx_intervals(events, cons, window=w)
@@ -295,9 +333,10 @@ def test_real_launched_capture():
     assert all(d > 0 for d in kernel_durations(ks))
     delays = launch_to_start_delays(ks)
     assert len(delays) == 2000
-    # nsys-schema.md 5.3: kernel.start - runtime.start 최소 4.1 us, 최대 1,377 us
-    med_us = statistics.median(delays) / 1e3
-    assert 4.1 <= med_us <= 1377
+    # bounds from nsys-schema.md 5.3: min 4.1 us, max 1,377 us (values in ns)
+    assert min(delays) >= 4.1e3
+    assert max(delays) <= 1377e3
+    assert statistics.median(delays) < 100e3
     by_pid: dict[int, list] = {}
     for k in ks:
         by_pid.setdefault(k.pid, []).append((k.start_ns, k.end_ns))

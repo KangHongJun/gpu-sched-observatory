@@ -70,47 +70,59 @@ def context_residency(
 
 
 def slice_durations(intervals: list[tuple[int, int]]) -> list[int]:
-    """맞닿거나 겹친 구간을 합친 뒤 각 구간의 길이(ns), 시간순."""
-    return [e - s for s, e in _merge(intervals)]
+    """맞닿거나 겹친 구간을 합친 뒤 각 구간의 길이(ns), 시간순. 길이 0인 구간은 뺀다."""
+    return [e - s for s, e in _merge(intervals) if e > s]
 
 
 def _restores(events: list[CtxEvent], t0: int, t1: int) -> list[CtxEvent]:
     return [ev for ev in events if ev.tag == _RESTORE_START and t0 <= ev.ts_ns < t1]
 
 
-def _context_of(ev: CtxEvent):
+def _context_of(ev: CtxEvent) -> object:
     return _OPAQUE if ev.pid is None else ev.global_pid
 
 
-def _switches_by_gpu(events: list[CtxEvent], t0: int, t1: int) -> dict[int, int]:
+def _by_gpu(events: list[CtxEvent], t0: int, t1: int) -> dict[int, list[CtxEvent]]:
     per_gpu: dict[int, list[CtxEvent]] = {}
     for ev in _restores(events, t0, t1):
         per_gpu.setdefault(ev.gpu_id, []).append(ev)
-    out: dict[int, int] = {}
-    for gpu, evs in per_gpu.items():
+    for evs in per_gpu.values():
         evs.sort(key=lambda e: e.ts_ns)  # 안정 정렬: 같은 ts는 입력 순서
-        out[gpu] = sum(
-            1 for a, b in itertools.pairwise(evs) if _context_of(a) != _context_of(b)
-        )
-    return out
+    return per_gpu
+
+
+def _switch_count(evs: list[CtxEvent]) -> int | None:
+    """None: 모든 RESTORE_START가 마스킹이라 알 수 없다."""
+    if all(e.pid is None for e in evs):
+        return None
+    return sum(
+        1 for a, b in itertools.pairwise(evs) if _context_of(a) != _context_of(b)
+    )
 
 
 def switch_rate(events: list[CtxEvent], t0: int, t1: int) -> float | None:
-    """GPU 전체의 컨텍스트 전환 수 / 초.
+    """창 안에서 수가 정해지는 GPU들의 컨텍스트 전환 수 합 / 초.
 
     ``t0 <= ts_ns < t1``의 RESTORE_START(tag 8)만 센다(SAVE_END 등 다른 태그는 무시).
     GPU별로 시간순에서 직전 RESTORE_START와 컨텍스트(``global_pid``)가 다르면 전환 1회다.
-    한 GPU의 마스킹 행(pid None)은 모두 하나의 불투명한 컨텍스트로 본다. 각 GPU의 첫
-    RESTORE_START는 전환이 아니다. 모든 GPU의 전환 합을 ``(t1 - t0)`` 초로 나눈다.
-    ``t1 <= t0``이거나 창 안에 RESTORE_START가 없으면 None.
+    마스킹 행(pid None)은 한 GPU에서 모두 하나의 "마스킹 그룹"으로 본다: 비마스킹
+    컨텍스트와 마스킹 그룹 사이의 전환은 세지만 마스킹 프로세스끼리의 전환은 세지 않으므로
+    마스킹 행이 있는 GPU의 값은 **하한**이다(``switch_rate_is_lower_bound_by_gpu``).
+    각 GPU의 첫 RESTORE_START는 전환이 아니다. RESTORE_START가 전부 마스킹인 GPU는 알 수
+    없어 합에서 뺀다. 합은 ``(t1 - t0)`` 초로 나눈다. ``t1 <= t0``이거나 수가 정해지는
+    GPU가 없으면(RESTORE_START 없음, 전부 마스킹) None.
     """
     _check_window(t0, t1)
     if t1 <= t0:
         return None
-    sw = _switches_by_gpu(events, t0, t1)
-    if not sw:
+    counts = [
+        c
+        for evs in _by_gpu(events, t0, t1).values()
+        if (c := _switch_count(evs)) is not None
+    ]
+    if not counts:
         return None
-    return sum(sw.values()) / ((t1 - t0) / 1e9)
+    return sum(counts) / ((t1 - t0) / 1e9)
 
 
 def switch_rate_by_gpu(
@@ -118,13 +130,38 @@ def switch_rate_by_gpu(
 ) -> dict[int, float | None]:
     """``switch_rate``와 같은 정의를 GPU별로 계산한다.
 
-    창 안에 RESTORE_START가 있는 GPU만 키가 된다. ``t1 <= t0``이면 빈 dict(알 수 없음).
+    창 안에 RESTORE_START가 없는 GPU는 키가 없다: 키 없음은 "창 안에 restore 이벤트
+    없음"이며 호출자는 N/A로 보여야 한다. RESTORE_START가 전부 마스킹인 GPU는 None
+    (알 수 없음: 마스킹 뒤에 여러 프로세스가 있을 수 있다). 마스킹 행과 비마스킹 행이
+    섞인 GPU의 수는 마스킹 프로세스끼리의 전환을 세지 않는 하한이다. ``t1 <= t0``이면
+    빈 dict.
     """
     _check_window(t0, t1)
     if t1 <= t0:
         return {}
     secs = (t1 - t0) / 1e9
-    return {gpu: n / secs for gpu, n in _switches_by_gpu(events, t0, t1).items()}
+    out: dict[int, float | None] = {}
+    for gpu, evs in _by_gpu(events, t0, t1).items():
+        c = _switch_count(evs)
+        out[gpu] = None if c is None else c / secs
+    return out
+
+
+def switch_rate_is_lower_bound_by_gpu(
+    events: list[CtxEvent], t0: int, t1: int
+) -> dict[int, bool]:
+    """GPU별로 창 안에 마스킹 RESTORE_START가 하나라도 있으면 True(전환율이 하한).
+
+    ``switch_rate_by_gpu``와 같은 키 집합이다(RESTORE_START가 있는 GPU). ``t1 <= t0``이면
+    빈 dict.
+    """
+    _check_window(t0, t1)
+    if t1 <= t0:
+        return {}
+    return {
+        gpu: any(e.pid is None for e in evs)
+        for gpu, evs in _by_gpu(events, t0, t1).items()
+    }
 
 
 def restores_per_second(
