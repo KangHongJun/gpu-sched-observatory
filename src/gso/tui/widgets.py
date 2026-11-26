@@ -112,3 +112,29 @@ def fmt_temp(c: float | None) -> str:
 
 def fmt_power(w: float | None) -> str:
     return NA if w is None else f"{w:.0f} W"
+
+
+def render_timeline(
+    by_key: dict[int, list[tuple[int, int]]], t0: int, t1: int, width: int
+) -> dict[int, str]:
+    """One text row per key: ``=`` where any ``[start, end)`` interval overlaps the cell's
+    half-open time slice, a space elsewhere. The window ``[t0, t1)`` is cut into ``width``
+    equal cells. Empty (zero-length) intervals mark nothing; ``t1 <= t0`` gives blank rows.
+    """
+    if width < 1:
+        raise ValueError(f"width must be >= 1, got {width}")
+    span = t1 - t0
+    out: dict[int, str] = {}
+    for key, ivs in by_key.items():
+        cells = [" "] * width
+        if span > 0:
+            for s, e in ivs:
+                s, e = max(s, t0), min(e, t1)
+                if e <= s:
+                    continue
+                first = (s - t0) * width // span
+                last = ((e - t0) * width + span - 1) // span - 1
+                for c in range(first, min(last, width - 1) + 1):
+                    cells[c] = "="
+        out[key] = "".join(cells)
+    return out

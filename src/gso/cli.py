@@ -256,6 +256,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="no terminal UI: collect for --duration seconds and write --export")
     live.add_argument("--duration", type=_positive_float, default=None, metavar="SECONDS",
                       help="headless run length in seconds (> 0)")
+    from gso import cli_capture
+
+    cli_capture.add_parser(sub)
     return parser
 
 
@@ -285,7 +288,19 @@ def _validate_live(parser: argparse.ArgumentParser, args) -> None:
 
 def main(argv: list[str] | None = None, *, sleep=time.sleep, clock=time.monotonic) -> int:
     parser = build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    tail = None  # everything after "--" is a command to launch (gso capture only)
+    if "--" in argv:
+        i = argv.index("--")
+        argv, tail = argv[:i], argv[i + 1 :]
     args = parser.parse_args(argv)
+    if tail is not None and args.command != "capture":
+        parser.error("unexpected arguments after '--'")
+    if args.command == "capture":
+        from gso import cli_capture
+
+        cli_capture.validate(parser, args, tail)
+        return cli_capture.run_capture(args)
     if args.command == "live":
         _validate_live(parser, args)
         if args.headless:
