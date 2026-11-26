@@ -332,3 +332,67 @@ CUPTI 13.x(헤더·라이브러리 모두 API 버전 130202). 프로젝트 venv�
 ### 미확인
 - nsys 캡처 구간(10초) 안의 처리량·지연 오버헤드. 다른 워크로드(큰 커널), 다른 갱신 주기(100 ms 외), 반복 횟수 3 초과일 때의 값. root 캡처, 직접 띄운 대상 캡처의 오버헤드(Task 4의 `ctx_launched`는 처리량을 측정하지 않았다).
 - nsys 반복 3의 p99가 반복 1, 2의 약 절반인 이유.
+
+
+## Task 21: nsys 기준 데이터와 교차 확인
+
+날짜 2026-11-26, nsys `NVIDIA Nsight Systems version 2026.6.1.251-266139333969v0`, 비루트, MPS 꺼짐. 실제 캡처는 **GPU 2에서만** 했다(GPU 1은 다른 사용자가 쓰기 시작해 쓸 수 없게 되었다). 캡처 전후에 GPU 2가 유휴(0%, 1 MiB)임을 확인했고 nsys가 남지 않았음을 확인했다.
+
+### 무엇을 비교했나
+nsys export 파일에 대해 `docs/verification/nsys-schema.md` §2~§5, §10을 보고 로더 코드와 따로 작성한 SQL(읽기 전용, `PROCESSES` 미조회)의 값과 gso 로더/리포트의 값을 나란히 놓았다. 스크립트 `scripts/verify/21_crosscheck.py`가 같은 비교를 실제 캡처에 대해 출력하고, `tests/test_crosscheck.py`가 커밋된 fixture 두 개(`nsys_ctxsw_min`, `nsys_launched_min`)에서 같은 질문을 검사한다.
+
+- 컨텍스트 전환 행 수, 커널 행 수, 커널 `SUM(end - start)`
+- 디코딩된 PID별 커널 수, 첫 `start`, 마지막 `end`
+- (gpuId, PID)별 `RESTORE_START`(tag 8)와 `SAVE_END`(tag 7) 수(마스킹 행은 한 묶음)
+- 캡처 창 `w1`(§4.3 규칙을 SQL로 따로 계산)과, 그 창으로 나눈 `restores_per_second`
+- 리포트 `raw_counts`와 테이블별 `COUNT(*)`
+
+표의 프로세스는 처음 나타난 순서대로 A, B로 표시했다(PID는 출력하지 않는다).
+
+### 전역 캡처 (GPU 2, 같은 GPU에서 `small_kernels` 두 프로세스, 10초)
+```
+comparison                                        |                    SQL |                    gso | match
+--------------------------------------------------+------------------------+------------------------+------
+ctx events: count (all GPUs)                      |                 204541 |                 204541 | ✓
+GPU 2 ctx, process A: RESTORE_START (tag 8) count |                  49303 |                  49303 | ✓
+GPU 2 ctx, process A: SAVE_END (tag 7) count      |                  49348 |                  49348 | ✓
+GPU 2 ctx, process B: RESTORE_START (tag 8) count |                  49297 |                  49297 | ✓
+GPU 2 ctx, process B: SAVE_END (tag 7) count      |                  49343 |                  49343 | ✓
+GPU 2 restores/s, process A (window 10.182 s)     |            4842.197962 |            4842.197962 | ✓
+GPU 2 restores/s, process B (window 10.182 s)     |            4841.608684 |            4841.608684 | ✓
+capture window w1 ns                              |            10181946377 |            10181946377 | ✓
+report raw_counts: GPU_CONTEXT_SWITCH_EVENTS      |                 204541 |                 204541 | ✓
+report raw_counts: ENUM_GPU_CTX_SWITCH            |                     13 |                     13 | ✓
+report raw_counts: StringIds                      |                   1217 |                   1217 | ✓
+report raw_counts: DIAGNOSTIC_EVENT               |                     12 |                     12 | ✓
+
+12/12 comparisons match
+```
+
+### 직접 띄운 캡처 (GPU 2, `small_kernels` 8초, 10초 캡처)
+```
+comparison                                        |                    SQL |                    gso | match
+--------------------------------------------------+------------------------+------------------------+------
+ctx events: count (all GPUs)                      |                   7712 |                   7712 | ✓
+kernels: count                                    |                 268516 |                 268516 | ✓
+kernels: sum(end - start) ns                      |             2144083465 |             2144083465 | ✓
+kernels, process A: count                         |                 268516 |                 268516 | ✓
+kernels, process A: first start ns                |             3641369210 |             3641369210 | ✓
+kernels, process A: last end ns                   |             9999986513 |             9999986513 | ✓
+GPU 2 ctx, process A: RESTORE_START (tag 8) count |                      2 |                      2 | ✓
+GPU 2 ctx, process A: SAVE_END (tag 7) count      |                      1 |                      1 | ✓
+GPU 2 restores/s, process A (window 10.047 s)     |               0.199070 |               0.199070 | ✓
+capture window w1 ns                              |            10046742344 |            10046742344 | ✓
+report raw_counts: GPU_CONTEXT_SWITCH_EVENTS      |                   7712 |                   7712 | ✓
+report raw_counts: ENUM_GPU_CTX_SWITCH            |                     13 |                     13 | ✓
+report raw_counts: CUPTI_ACTIVITY_KIND_KERNEL     |                 268516 |                 268516 | ✓
+report raw_counts: CUPTI_ACTIVITY_KIND_RUNTIME    |                 806507 |                 806507 | ✓
+report raw_counts: StringIds                      |                   1217 |                   1217 | ✓
+report raw_counts: DIAGNOSTIC_EVENT               |                     15 |                     15 | ✓
+
+16/16 comparisons match
+```
+이 캡처는 nsys가 "CUPTI 이벤트가 누락되었을 수 있다"(버퍼 49/50)와 "불완전한 CUPTI 이벤트 1개를 버렸다"를 진단으로 남겼다. 표는 export에 들어 있는 행을 gso가 그대로 읽었는지를 비교하므로 이 누락 가능성은 표에 나타나지 않는다.
+
+### 판정
+28개 비교(전역 12, 직접 16) 모두 일치했고 불일치는 없었다(로더 수정 없음). 이 결과는 개수·합·처음/마지막 값의 일치이므로 **gso가 nsys가 내보낸 것과 같은 데이터를 읽고 같은 창으로 나눈다**는 것만 보인다. `restore_save`/`hold` 해석이 실제 GPU 점유와 맞는지, 비율의 의미는 이 비교로 확인하지 않았다. 따라서 "nsys 기준 데이터와 모순되지 않는 타임라인"은 데이터 읽기와 집계 수준에서만 지지된다.
