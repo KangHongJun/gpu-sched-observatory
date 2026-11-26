@@ -17,9 +17,9 @@ import importlib.util
 
 # python -m gso.bench.workloads.<name>로 실행되는 모듈. trt_infer는 tensorrt 패키지가 있을 때만
 # 넣는다(import하지 않고 find_spec으로 확인한다).
-_CANDIDATES = ("small_kernels", "membound", "fp16_matmul", "trt_infer", "decode")
+ALL_WORKLOADS = ("small_kernels", "membound", "fp16_matmul", "trt_infer", "decode")
 WORKLOADS = tuple(
     n
-    for n in _CANDIDATES
+    for n in ALL_WORKLOADS
     if n != "trt_infer" or importlib.util.find_spec("tensorrt") is not None
 )

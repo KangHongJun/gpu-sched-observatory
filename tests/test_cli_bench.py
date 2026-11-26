@@ -255,3 +255,14 @@ def test_dcgm_provenance_goes_to_env_info(spy, tmp_path):
     cli.main(_bench(tmp_path))
     ei = spy.calls[0][1]["env_info"]
     assert ei["dcgm_available"] is True and ei["dcgm_reason"] == "ok"
+
+
+def test_help_lists_every_workload(capsys):
+    from gso.bench.workloads import ALL_WORKLOADS, WORKLOADS
+
+    with pytest.raises(SystemExit):
+        cli.main(["bench", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    for name in ALL_WORKLOADS:  # includes trt_infer even when tensorrt is missing
+        assert name in out
+    assert set(WORKLOADS) <= set(ALL_WORKLOADS)

@@ -72,7 +72,7 @@ gso never calls `sudo`. Everything was verified without root. In that mode:
 ## Install
 
 ```bash
-git clone <repository-url> gpu-sched-observatory
+git clone https://github.com/KangHongJun/gpu-sched-observatory
 cd gpu-sched-observatory
 uv sync                       # live, capture, compare, doctor
 uv sync --group bench         # additionally, the benchmark workloads
@@ -83,8 +83,9 @@ For development: `uv sync --group dev && uv run pytest -q`.
 
 ## Usage
 
-`--gpu` is always required. There is no default GPU, so you never touch a GPU by accident
-on a shared machine.
+Every command that touches a GPU (`live`, `capture`, `bench`) requires `--gpu`. There is no
+default GPU, so you never touch a GPU by accident on a shared machine. `doctor` and
+`compare` take no `--gpu`.
 
 ### `gso doctor`
 
@@ -142,18 +143,23 @@ uv run gso bench --gpu 2 --a decode --b fp16_matmul --out out/bench2 \
 
 Runs workloads A and B together on one GPU under `mps_off`, `mps_100_100`, `mps_50_50`,
 `mps_70_30` and `mps_30_70` (or the subset given by `--conditions`). Workloads:
-`small_kernels`, `membound`, `fp16_matmul`, `trt_infer`, `decode`. Per condition: one
+`small_kernels`, `membound`, `fp16_matmul`, `trt_infer` (only with the tensorrt package), `decode`. Per condition: one
 untimed warm-up and at least three measured repetitions (`--reps`, default 3). Results go
 to `OUT/results.jsonl` and `OUT/run.json`. `--profile` adds one on-demand nsys capture per
 repetition; profiled and unprofiled rows must not be compared.
 
 Safety behaviour:
 
-- The MPS daemon is user-scoped, started per MPS condition and stopped afterwards. The
-  run refuses to start if an MPS daemon or server (anyone's) already exists on the
-  machine, or if the GPU already has a compute process.
-- If another process shows up on the GPU, that repetition is marked unfair and excluded,
-  and the run aborts (exit code 3).
+- The MPS daemon is user-scoped, started per MPS condition and stopped afterwards.
+- A safety check runs before each repetition. It fails if the GPU has a
+  compute process (plain or MPS) that this run did not start, if any MPS control daemon or
+  server exists on the machine that this run did not start, or if safety cannot be
+  established (for example NVML cannot list the processes). A failing check is retried for
+  5 s, because this run's own MPS server may still be exiting; if it keeps failing, the run
+  aborts.
+- During each repetition the GPU is sampled once per second, and the check runs again right
+  after it. If a foreign process was seen in either, the repetition's rows are written but
+  marked unfair and excluded from the statistics, and the run aborts (exit code 3).
 - No `sudo`, no clock locking. The GPU is cooled down between repetitions (at most 60 s).
 
 Exit codes: 0 complete, 1 incomplete (failed repetitions), 2 usage error, 3 aborted for

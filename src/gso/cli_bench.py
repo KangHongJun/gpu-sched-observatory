@@ -20,7 +20,7 @@ from gso.bench.runner import (
     run_matrix,
 )
 from gso.bench.telemetry import NvmlDcgmTelemetry
-from gso.bench.workloads import WORKLOADS
+from gso.bench.workloads import ALL_WORKLOADS, WORKLOADS
 from gso.capability import detect
 
 EXIT_USAGE = 2
@@ -75,7 +75,10 @@ def add_parser(sub) -> None:
         required=True,
         choices=WORKLOADS,
         metavar="WORKLOAD",
-        help="workload A: " + ", ".join(WORKLOADS),
+        help="workload A: "
+        + ", ".join(ALL_WORKLOADS)
+        + "; trt_infer is available only when the tensorrt package is installed"
+        " (uv sync --group bench)",
     )
     p.add_argument(
         "--b", required=True, choices=WORKLOADS, metavar="WORKLOAD", help="workload B"
