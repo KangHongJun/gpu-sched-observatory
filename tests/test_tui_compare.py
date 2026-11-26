@@ -68,3 +68,20 @@ def test_live_bench_dir_validated_before_start(tmp_path, capsys):
             ]
         )
     assert e.value.code == 2
+
+
+async def test_f5_not_wrapped_at_120_columns_and_scrollable(tmp_path):
+    from gso.bench import report
+
+    d = results_dir(tmp_path)
+    longest = max(len(line) for line in report.view_text(d).splitlines())
+    assert longest > 120  # the case being guarded
+    app = GsoApp(full_buffer(), caps(), 1, clock_ns=lambda: NOW, bench_dir=d)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("f5")
+        await settle(pilot)
+        w = app.query_one("#compare-text")
+        view = app.query_one("#compare-view")
+        assert w.size.width >= longest  # rows are not wrapped to the terminal width
+        assert w.size.height <= len(report.view_text(d).splitlines()) + 1  # one per line
+        assert view.max_scroll_x > 0  # the rest is reachable horizontally

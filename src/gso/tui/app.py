@@ -68,7 +68,8 @@ class GsoApp(App):
     .bar { height: 1; }
     #metrics-view { height: 1fr; }
     #timeline-view { height: 1fr; display: none; overflow: hidden; }
-    #compare-view { height: 1fr; display: none; }
+    #compare-view { height: 1fr; display: none; overflow-x: auto; overflow-y: auto; }
+    #compare-text { width: auto; height: auto; text-wrap: nowrap; text-overflow: clip; }
     #proc-table { height: 1fr; min-height: 2; margin-top: 1; overflow: hidden; }
     #history { height: 4; }
     #status { height: 1; }

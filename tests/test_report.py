@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -168,7 +169,8 @@ def test_per_proc_tables_labelled_with_workload_and_no_sum():
     ]
     md = to_markdown(rows)
     assert "Proc A: membound" in md and "Proc B: decode" in md
-    assert "sum" not in md.lower().replace("summary", "")
+    assert not re.search(r"\b(sum|total|a\+b)\b", md.lower())
+    assert len(compare(rows)) == 2 and {c["proc"] for c in compare(rows)} == {"A", "B"}
 
 
 # -- ruling 5: notes ---------------------------------------------------------------------------
@@ -242,10 +244,11 @@ def test_all_applicable_notes():
         "INCOMPLETE" in to_markdown(rows, m).split("## Notes")[0]
     )  # prominent, before tables
     assert "aborted" in n
-    assert "cooldown" in n.lower() and "1 repetition" in n
+    assert "did not reach the target temperature before 1 repetition" in n
+    assert "warmer" not in n
     assert "no host engine" in n
     assert "contamination" in n.lower()
-    assert "telemetry" in n.lower() and "2" in n
+    assert "2 telemetry error(s)" in n
     assert "server" in n and "100" in n and "regardless" in n
     assert "2 malformed" in n
 
@@ -334,3 +337,27 @@ def test_md_write_failure_exits_3(tmp_path, capsys):
 def test_load_meta_bad_json_is_none(tmp_path):
     (tmp_path / "run.json").write_text("{nope")
     assert report.load_meta(tmp_path) is None
+
+
+def test_contamination_note_claims_exclusion_only_when_rows_unfair():
+    ev = meta(contamination_events=[{"x": 1}])
+    plain = notes_of(to_markdown([row()], ev))
+    assert "1 contamination event(s)" in plain and "excluded" not in plain
+    rows = [
+        row(),
+        row(rep=2, fair=False, fair_reason="foreign GPU process during window"),
+    ]
+    n = notes_of(to_markdown(rows, ev))
+    assert "1 row(s) are marked unfair" in n
+
+
+def test_metric_n_smaller_than_n_used_is_shown():
+    rows = [
+        row(thr=10.0, p99=1.0, rep=1),
+        row(thr=10.0, p99=None, rep=2),
+        row(thr=10.0, p99=3.0, rep=3),
+    ]
+    c = by(rows, "mps_off")
+    assert c["n"] == 3 and c["p99_n"] == 2 and c["throughput_n"] == 3
+    md = to_markdown(rows)
+    assert "(n=2)" in md and "(n=3)" not in md

@@ -221,6 +221,8 @@ def compare(rows: Iterable[dict], baseline: str = BASELINE) -> list[dict]:
                 "n_excluded": st.n_excluded,
                 "requested_pct": st.requested_pct,
                 "server_pct": st.server_pct,
+                "throughput_n": st.throughput.n,
+                "p99_n": st.p99.n,
                 "throughput_mean": st.throughput.mean,
                 "throughput_stdev": st.throughput.stdev,
                 "throughput_cv": st.throughput.cv,
@@ -259,6 +261,11 @@ def _headers(baseline: str) -> list[str]:
     ]
 
 
+def _short(c: dict, key: str) -> str:
+    """Marker when a mean covers fewer repetitions than 'n used' shows."""
+    return f" (n={c[key]})" if 0 < c[key] < c["n"] else ""
+
+
 def _cells(c: dict) -> list[str]:
     return [
         c["condition"],
@@ -266,10 +273,10 @@ def _cells(c: dict) -> list[str]:
         str(c["n_excluded"]),
         c["requested_pct"] or NA,
         c["server_pct"] or NA,
-        _f(c["throughput_mean"], ".1f"),
+        _f(c["throughput_mean"], ".1f") + _short(c, "throughput_n"),
         _pct_cell(c["throughput_cv"]),
         _f(c["throughput_change_pct"], "+.1f"),
-        _f(c["p99_mean"], ".3f"),
+        _f(c["p99_mean"], ".3f") + _short(c, "p99_n"),
         _pct_cell(c["p99_cv"]),
         _f(c["p99_change_pct"], "+.1f"),
     ]
@@ -342,17 +349,27 @@ def _notes(rows: Sequence[dict], meta: dict | None, skipped: int) -> list[str]:
     }
     if timeouts:
         notes.append(
-            f"Cooldown timed out before {len(timeouts)} repetition(s): they started warmer "
-            "than the baseline."
+            f"The cooldown did not reach the target temperature before {len(timeouts)} "
+            "repetition(s) (timed out)."
         )
     if meta is not None and meta.get("dcgm_available") is False:
         reason = str(meta.get("dcgm_reason") or NA).rstrip(". ")
         notes.append(f"DCGM unavailable: {reason}. DCGM metrics are {NA}.")
     events = (meta or {}).get("contamination_events") or []
     if events:
+        foreign = sum(
+            1
+            for r in rows
+            if r.get("fair") is False
+            and "foreign" in str(r.get("fair_reason") or "").lower()
+        )
+        tail = (
+            f" {foreign} row(s) are marked unfair for it and excluded."
+            if foreign
+            else ""
+        )
         notes.append(
-            f"{len(events)} contamination event(s): a foreign GPU process was seen; "
-            "affected repetitions are excluded as unfair."
+            f"{len(events)} contamination event(s): a foreign GPU process was seen.{tail}"
         )
     errs = (meta or {}).get("telemetry_errors") or []
     if errs:
@@ -393,8 +410,13 @@ def _document(
     rows: Sequence[dict], meta: dict | None, skipped: int, baseline: str, md: bool
 ) -> str:
     rows = list(rows)
-    h1 = lambda t: f"# {t}" if md else t
-    h2 = lambda t: f"## {t}" if md else t
+
+    def h1(t: str) -> str:
+        return f"# {t}" if md else t
+
+    def h2(t: str) -> str:
+        return f"## {t}" if md else t
+
     lines = [h1("MPS A/B comparison")]
     if meta:
         parts = [
