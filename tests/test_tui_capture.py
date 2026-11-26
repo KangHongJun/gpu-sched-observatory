@@ -201,13 +201,13 @@ async def test_f3_before_and_after_capture_and_f2_returns():
         assert "PID" in screen_text(app)
 
 
-async def test_f5_still_not_available():
+async def test_f5_without_bench_dir_says_na():
     app = make(FakeRunner())
     async with app.run_test(size=(120, 35)) as pilot:
         await settle(pilot)
         await pilot.press("f5")
         await settle(pilot)
-        assert "F5" in text(app, "status") and "not available yet" in text(app, "status")
+        assert "N/A — no benchmark results loaded (--bench-dir DIR)" in text(app, "compare-text")
 
 
 async def test_exit_during_running_capture_is_bounded():

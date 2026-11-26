@@ -113,7 +113,8 @@ def build_live(args):
     from gso.tui.app import GsoApp  # Textual only on the interactive path
 
     buffer, caps, collector = build_collection(args)
-    return GsoApp(buffer, caps, args.gpu, collector=collector, interval_s=args.interval)
+    return GsoApp(buffer, caps, args.gpu, collector=collector, interval_s=args.interval,
+                  bench_dir=args.bench_dir)
 
 
 def _summary(count: int, path, elapsed_s: float, lost: int, what: str) -> str:
@@ -256,10 +257,13 @@ def build_parser() -> argparse.ArgumentParser:
                       help="no terminal UI: collect for --duration seconds and write --export")
     live.add_argument("--duration", type=_positive_float, default=None, metavar="SECONDS",
                       help="headless run length in seconds (> 0)")
-    from gso import cli_bench, cli_capture
+    live.add_argument("--bench-dir", metavar="DIR", default=None,
+                      help="benchmark results directory (from `gso bench`) shown in the F5 Compare view")
+    from gso import cli_bench, cli_capture, cli_compare
 
     cli_capture.add_parser(sub)
     cli_bench.add_parser(sub)
+    cli_compare.add_parser(sub)
     return parser
 
 
@@ -270,6 +274,15 @@ def _validate_live(parser: argparse.ArgumentParser, args) -> None:
         parser.error("--headless requires --duration")
     if args.headless and not args.export:
         parser.error("--headless requires --export")
+    if args.bench_dir is not None:
+        if args.headless:
+            parser.error("--bench-dir requires the interactive screen (not --headless)")
+        from gso.bench import report
+
+        try:
+            report.load_results(args.bench_dir)
+        except report.ReportError as e:
+            parser.error(f"--bench-dir: {e}")
     if args.duration is not None and not args.headless:
         parser.error("--duration requires --headless (the interactive screen has no duration)")
     if args.export:
@@ -307,6 +320,10 @@ def main(argv: list[str] | None = None, *, sleep=time.sleep, clock=time.monotoni
 
         cli_bench.validate(parser, args)
         return cli_bench.run(args)
+    if args.command == "compare":
+        from gso import cli_compare
+
+        return cli_compare.run(args)
     if args.command == "live":
         _validate_live(parser, args)
         if args.headless:

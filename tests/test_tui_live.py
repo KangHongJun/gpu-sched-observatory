@@ -229,10 +229,9 @@ async def test_nvml_error_and_dropped_on_status_line():
 async def test_function_keys_show_notice_and_q_quits():
     app = make_app(full_buffer(), caps(dcgm_ok=True))
     async with app.run_test(size=(100, 30)) as pilot:
-        for key, name in (("f5", "F5"),):
-            await pilot.press(key)
-            await settle(pilot)
-            assert f"{name}" in text(app, "status") and "not available yet" in text(app, "status")
+        await pilot.press("f5")
+        await settle(pilot)
+        assert "no benchmark results loaded" in text(app, "compare-text")
         await pilot.press("f2")
         await settle(pilot)
         assert "not available yet" not in text(app, "status")

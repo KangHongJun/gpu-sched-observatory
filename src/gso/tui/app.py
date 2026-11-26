@@ -12,10 +12,11 @@ from typing import ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static
 from textual.worker import Worker, WorkerState
 
+from gso.bench import report as bench_report
 from gso.buffer import RingBuffer
 from gso.capability import Capabilities
 from gso.record import Record
@@ -67,6 +68,7 @@ class GsoApp(App):
     .bar { height: 1; }
     #metrics-view { height: 1fr; }
     #timeline-view { height: 1fr; display: none; overflow: hidden; }
+    #compare-view { height: 1fr; display: none; }
     #proc-table { height: 1fr; min-height: 2; margin-top: 1; overflow: hidden; }
     #history { height: 4; }
     #status { height: 1; }
@@ -91,6 +93,7 @@ class GsoApp(App):
         clock_ns=time.time_ns,
         capture_runner: CaptureRunner | None = None,
         capture_duration_s: int = 10,
+        bench_dir: str | Path | None = None,
     ) -> None:
         super().__init__()
         self._buffer = buffer
@@ -113,6 +116,7 @@ class GsoApp(App):
         self._tmpdir: Path | None = None
         self._quitting = False
         self._view = "F2"
+        self._compare_text = bench_report.view_text(bench_dir)  # static: read once
 
     @property
     def buffer(self) -> RingBuffer:
@@ -132,6 +136,8 @@ class GsoApp(App):
             yield Static("", id="proc-table", markup=False)
             yield Static("", id="history", markup=False)
         yield Static("", id="timeline-view", markup=False)
+        with VerticalScroll(id="compare-view"):
+            yield Static(self._compare_text, id="compare-text", markup=False)
         yield Static("", id="status", markup=False)
         yield Static(FOOTER, id="footer", markup=False)
 
@@ -154,7 +160,7 @@ class GsoApp(App):
         self._notice = (text, self._clock_ns() + NOTICE_S * _S)
 
     def action_view(self, name: str) -> None:
-        if name.startswith(("F2", "F3")):
+        if name.startswith(("F2", "F3", "F5")):
             self._notice = None
             self._view = name[:2]
             self._show_view()
@@ -165,6 +171,7 @@ class GsoApp(App):
     def _show_view(self) -> None:
         self.query_one("#metrics-view").display = self._view == "F2"
         self.query_one("#timeline-view").display = self._view == "F3"
+        self.query_one("#compare-view").display = self._view == "F5"
 
     def action_capture(self) -> None:
         if self._capture_running:
