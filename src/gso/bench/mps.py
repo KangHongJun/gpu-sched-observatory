@@ -21,11 +21,28 @@ Marking the daemon as own for ``ensure_safe``
 together with the PIDs of your own client processes, as ``ensure_safe(gpu, own_pids=...)``; the
 same set is used both for the GPU compute-process check and for the "any MPS daemon on the
 machine" check.
+
+Session lock and device order
+-----------------------------
+One session per user at a time: ``base_dir/session.lock`` is flock'ed exclusively (opened with
+``O_NOFOLLOW``) from before the machine-wide MPS check until after the daemon has been stopped.
+The daemon is started with ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` forced (never inherited) so that
+``CUDA_VISIBLE_DEVICES=<gpu_index>`` means the same device as the NVML index checked by
+``ensure_safe``. ``quit`` is only sent for a daemon that provably started during our own start
+attempt (our pipe answered, or a control process with our pipe dir in its environment whose start
+time is after our ``-d`` call began).
+
+Recording thread percentages
+----------------------------
+The per-client ``CUDA_MPS_ACTIVE_THREAD_PERCENTAGE`` is a requested upper limit set at client
+launch; it cannot be read back through ``gso.providers.mps.query``, whose ``thread_pct`` is the
+server's own setting. Record both, labeled "requested (client)" and "server setting".
 """
 
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 import re
 import signal
@@ -104,7 +121,9 @@ def ensure_safe(
     MPS) whose PID is not in ``own_pids``; or an MPS control daemon/server exists anywhere on
     the machine whose PID is not in ``own_pids``. ``own_pids`` is normally
     ``session.own_daemon_pids | your client PIDs``. If safety cannot be established (NVML or
-    process listing error) it refuses too."""
+    process listing error) it refuses too. That includes a driver that does not support the MPS
+    compute-process query (``NotSupported``): without it a process running under another user's
+    MPS server cannot be ruled out, so the GPU is not provably free."""
     own = set(own_pids)
     listing = mps_listing if mps_listing is not None else list_mps_processes
 
@@ -258,6 +277,8 @@ class MpsSession:
         self._kill = kill
         self._find_own = find_own or (lambda: find_own_processes(self.pipe_dir))
         self._identity = proc_identity
+        self._start_time = process_start_time
+        self._lock_fd: int | None = None
         self._started = False
         self._control: dict[int, tuple[int, int] | None] = {}  # pid -> identity at start
         self._servers: dict[int, tuple[int, int] | None] = {}
@@ -315,6 +336,7 @@ class MpsSession:
     def _env(self) -> dict[str, str]:
         return {
             **os.environ,
+            "CUDA_DEVICE_ORDER": "PCI_BUS_ID",  # override: index must match NVML's
             "CUDA_VISIBLE_DEVICES": str(self.gpu_index),
             _PIPE_ENV: self.pipe_dir,
             _LOG_ENV: self.log_dir,
@@ -322,17 +344,54 @@ class MpsSession:
 
     # -- lifecycle --
     def __enter__(self) -> MpsSession:  # noqa: PYI034
-        ensure_safe(self.gpu_index, nvml=self._nvml, mps_listing=self._listing)
-        self._prepare_base()
         try:
+            self._prepare_base()
+        except OSError as e:
+            raise UnsafeGpuError(f"cannot prepare {self.base_dir}: {e}") from e
+        self._acquire_lock()
+        try:
+            ensure_safe(self.gpu_index, nvml=self._nvml, mps_listing=self._listing)
             self._start()
         except BaseException:
-            self._stop(raise_on_leftover=False)
+            try:
+                self._stop(raise_on_leftover=False)
+            finally:
+                self._release_lock()
             raise
         return self
 
+    def _acquire_lock(self) -> None:
+        path = self.base_dir / "session.lock"
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        except OSError as e:
+            raise UnsafeGpuError(f"cannot open session lock {path}: {e}") from e
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            raise UnsafeGpuError("another gso MPS session of this user is active") from None
+        self._lock_fd = fd
+
+    def _release_lock(self) -> None:
+        fd, self._lock_fd = self._lock_fd, None
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)  # closing drops the flock
+
+    def _adopt_if_started_by_us(self, t0_wall: float) -> None:
+        """After a failed start: take responsibility for a control process of ours (pipe dir in
+        its environment) that began after our ``-d`` call did. Anything older is not ours."""
+        for pid, kind in self._find_own():
+            started = self._start_time(pid)
+            if kind == "control" and started is not None and started >= t0_wall - 0.05:
+                self._control[pid] = self._identity(pid)
+                self._started = True
+
     def _start(self) -> None:
-        self._started = True  # from here on __exit__-style cleanup is our responsibility
+        if self._query().active:
+            raise UnsafeGpuError(f"an MPS daemon already answers on {self.pipe_dir}; refusing")
+        t0_wall = time.time()
         try:
             r = self._run(
                 [_BINARY, "-d"],
@@ -343,24 +402,34 @@ class MpsSession:
                 timeout=self._start_timeout_s,
             )
         except (OSError, subprocess.SubprocessError) as e:
+            self._adopt_if_started_by_us(t0_wall)
             raise UnsafeGpuError(f"could not start the MPS daemon: {e}") from e
         if r.returncode != 0:
+            self._adopt_if_started_by_us(t0_wall)
             detail = (r.stderr or r.stdout or "").strip()[:200]
             raise UnsafeGpuError(f"MPS daemon failed to start (exit {r.returncode}): {detail}")
         deadline = time.monotonic() + self._start_timeout_s
         while not self._query().active:
             if time.monotonic() >= deadline:
+                self._adopt_if_started_by_us(t0_wall)
                 raise UnsafeGpuError(
                     f"MPS daemon did not become active within {self._start_timeout_s:g}s"
                 )
             time.sleep(_POLL_S)
+        self._started = True  # -d returned 0 and our pipe answers: cleanup is now ours
         for pid, kind in self._find_own():
             if kind == "control":
                 self._control[pid] = self._identity(pid)
-        # If nothing was identified we rely on quit through our pipe plus waiting; see _stop.
+        if not self._control:
+            raise UnsafeGpuError(
+                "MPS daemon is up but its process could not be identified through our pipe dir"
+            )
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        self._stop(raise_on_leftover=exc_type is None)
+        try:
+            self._stop(raise_on_leftover=exc_type is None)
+        finally:
+            self._release_lock()
         return False
 
     def _stop(self, raise_on_leftover: bool) -> None:
@@ -409,12 +478,38 @@ class MpsSession:
 
     def _terminate_control_if_ours(self) -> None:
         """SIGTERM the recorded control daemon, only if it is still the same process (same start
-        time as when we started it) and still provably ours (found through our pipe dir)."""
+        time as when we started it) and still provably ours (found through our pipe dir).
+        With ``pidfd_open`` the identity is checked on the process the descriptor pins, so the
+        PID cannot be reused between check and signal; otherwise the check is best-effort."""
         live = {pid for pid, kind in self._find_own() if kind == "control"}
         for pid, ident in self._control.items():
-            if ident is None or pid not in live or self._identity(pid) != ident:
+            if ident is None or pid not in live:
                 continue
             try:
-                self._kill(pid, signal.SIGTERM)
+                if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+                    fd = os.pidfd_open(pid)
+                    try:
+                        if self._identity(pid) == ident:
+                            signal.pidfd_send_signal(fd, signal.SIGTERM)
+                    finally:
+                        os.close(fd)
+                elif self._identity(pid) == ident:
+                    self._kill(pid, signal.SIGTERM)
             except OSError:
                 pass
+
+
+def process_start_time(pid: int, proc_root: str = "/proc") -> float | None:
+    """Wall-clock start time of ``pid`` (seconds since the epoch), or None if unreadable.
+
+    ``/proc/<pid>/stat`` field 22 is the start time in clock ticks since boot; boot time is
+    ``now - /proc/uptime``."""
+    ident = proc_identity(pid, proc_root)
+    if ident is None:
+        return None
+    try:
+        with open(f"{proc_root}/uptime", encoding="utf-8") as f:
+            uptime = float(f.read().split()[0])
+        return time.time() - uptime + ident[1] / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None

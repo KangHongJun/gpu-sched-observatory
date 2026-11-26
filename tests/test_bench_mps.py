@@ -1,6 +1,8 @@
 import os
 import re
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -76,6 +78,13 @@ class Daemon:
         return subprocess.CompletedProcess(argv, 1, "", "")
 
 
+@pytest.fixture(autouse=True)
+def no_real_pidfd(monkeypatch):
+    """Fake PIDs must never reach a real pidfd_open/kill: hide pidfd unless a test installs a fake."""
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    monkeypatch.delattr(signal, "pidfd_send_signal", raising=False)
+
+
 def make(tmp_path, nvml=None, listing=None, **kw):
     base = tmp_path / "gso-mps"
     d = Daemon(base, **{k: kw.pop(k) for k in list(kw) if k in
@@ -90,6 +99,7 @@ def make(tmp_path, nvml=None, listing=None, **kw):
         kill=lambda pid, sig: d.killed.append(pid),
         **kw,
     )
+    s._start_time = lambda pid: None  # fake pids are never 'started after our -d'
     return s, d, base
 
 
@@ -274,7 +284,7 @@ def test_unsafe_gpu_refuses_before_starting(tmp_path):
     s, d, base = make(tmp_path, nvml=FakeNvml(gpus=[{}, {}, {}], procs={2: [999]}))
     with pytest.raises(UnsafeGpuError), s:
         pass
-    assert d.starts == [] and d.quits == [] and not base.exists()
+    assert d.starts == [] and d.quits == [] and not (base / "pipe" / "x").exists()
 
 
 def test_foreign_mps_daemon_refuses_session(tmp_path):
@@ -288,16 +298,154 @@ def test_startup_timeout_quits_our_daemon(tmp_path):
     s, d, _ = make(tmp_path, up_after_start=False, start_timeout_s=0.05)
     # daemon process exists but never answers on the pipe
     d.own = lambda: [(555, "control")] if d.starts and not d.quits else []
+    s._start_time = lambda pid: time.time() + 100  # a process of ours began after -d
     with pytest.raises(UnsafeGpuError, match="did not become active"), s:
         pass
     assert len(d.starts) == 1 and len(d.quits) == 1
 
 
-def test_start_command_failure_quits_and_raises(tmp_path):
+def test_start_timeout_without_new_process_sends_no_quit(tmp_path):
+    s, d, _ = make(tmp_path, up_after_start=False, start_timeout_s=0.05)
+    d.own = lambda: [(555, "control")]  # exists, but started before our -d: not ours
+    with pytest.raises(UnsafeGpuError, match="did not become active"), s:
+        pass
+    assert d.quits == []
+
+
+def test_start_failure_without_new_process_sends_no_quit(tmp_path):
     s, d, _ = make(tmp_path, start_ok=False, start_timeout_s=0.05)
     with pytest.raises(UnsafeGpuError, match="boom"), s:
         pass
+    assert d.quits == []
+
+
+def test_start_failure_with_new_process_of_ours_quits(tmp_path):
+    s, d, _ = make(tmp_path, start_ok=False, start_timeout_s=0.05)
+    d.own = lambda: [(555, "control")] if not d.quits else []
+    s._start_time = lambda pid: time.time() + 100
+    with pytest.raises(UnsafeGpuError, match="boom"), s:
+        pass
     assert len(d.quits) == 1
+
+
+def test_active_daemon_on_our_pipe_refused_without_start_or_quit(tmp_path):
+    s, d, _ = make(tmp_path)
+    d.up = True  # something already answers on our pipe dir
+    with pytest.raises(UnsafeGpuError, match="already answers"), s:
+        pass
+    assert d.starts == [] and d.quits == []
+    assert s._lock_fd is None
+
+
+def test_no_control_pid_identified_stops_and_raises(tmp_path):
+    s, d, _ = make(tmp_path)
+    d.own = list
+    with pytest.raises(UnsafeGpuError, match="could not be identified"), s:
+        pass
+    assert len(d.starts) == 1 and len(d.quits) == 1 and not d.up
+
+
+@pytest.mark.parametrize("parent", ["FASTEST_FIRST", None])
+def test_daemon_env_forces_pci_bus_id(tmp_path, monkeypatch, parent):
+    if parent is None:
+        monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_DEVICE_ORDER", parent)
+    before = dict(os.environ)
+    s, d, _ = make(tmp_path)
+    with s:
+        pass
+    assert d.starts[0]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert d.starts[0]["CUDA_VISIBLE_DEVICES"] == "2"
+    assert dict(os.environ) == before
+
+
+def test_second_session_refused_by_lock_before_any_run(tmp_path):
+    s1, d1, base = make(tmp_path)
+    with s1:
+        d2 = Daemon(base)
+        s2 = MpsSession(2, base_dir=base, run=d2.run, nvml=FakeNvml(gpus=[{}, {}, {}]),
+                        mps_listing=list, find_own=list)
+        with pytest.raises(UnsafeGpuError, match="another gso MPS session"), s2:
+            pass
+        assert d2.starts == d2.quits == d2.queries == []
+    assert len(d1.quits) == 1
+
+
+def _lock_is_free(base):
+    import fcntl
+
+    fd = os.open(base / "session.lock", os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def test_lock_released_after_normal_exit_exception_and_failed_start(tmp_path):
+    s, _, base = make(tmp_path)
+    with s:
+        assert not _lock_is_free(base)
+    assert _lock_is_free(base)
+    with pytest.raises(ValueError), s:
+        raise ValueError
+    assert _lock_is_free(base)
+    s2, _, _ = make(tmp_path, start_ok=False, start_timeout_s=0.05)
+    with pytest.raises(UnsafeGpuError), s2:
+        pass
+    assert _lock_is_free(base)
+    s3, _, _ = make(tmp_path, nvml=FakeNvml(gpus=[{}, {}, {}], procs={2: [9]}))
+    with pytest.raises(UnsafeGpuError), s3:
+        pass
+    assert _lock_is_free(base)
+
+
+def test_lock_file_symlink_refused(tmp_path):
+    base = tmp_path / "gso-mps"
+    base.mkdir(mode=0o700)
+    (base / "session.lock").symlink_to(tmp_path / "elsewhere")
+    s, d, _ = make(tmp_path)
+    with pytest.raises(UnsafeGpuError), s:
+        pass
+    assert d.starts == [] and not (tmp_path / "elsewhere").exists()
+
+
+def test_prepare_base_oserror_becomes_unsafe(tmp_path, monkeypatch):
+    s, d, _ = make(tmp_path)
+    monkeypatch.setattr(os, "chmod", lambda *a, **k: (_ for _ in ()).throw(PermissionError("nope")))
+    with pytest.raises(UnsafeGpuError, match="nope"), s:
+        pass
+    assert d.starts == []
+
+
+def test_pidfd_used_when_available(tmp_path, monkeypatch):
+    s, d, _ = make(tmp_path, quit_removes=False, stop_timeout_s=0.05)
+    d.own = lambda: [(555, "control")]
+    s._identity = lambda pid: (pid, 7)
+    sent = []
+    monkeypatch.setattr(os, "pidfd_open", lambda pid: os.open(os.devnull, os.O_RDONLY), raising=False)
+    monkeypatch.setattr(signal, "pidfd_send_signal", lambda fd, sig: sent.append(sig), raising=False)
+    with pytest.raises(RuntimeError, match="still running"), s:
+        pass
+    assert sent == [signal.SIGTERM] and d.killed == []
+
+
+def test_pidfd_identity_mismatch_not_signalled(tmp_path, monkeypatch):
+    import itertools
+
+    s, d, _ = make(tmp_path, quit_removes=False, stop_timeout_s=0.05)
+    d.own = lambda: [(555, "control")]
+    ids = itertools.chain([(555, 7)], itertools.repeat((555, 8)))
+    s._identity = lambda pid: next(ids)
+    sent = []
+    monkeypatch.setattr(os, "pidfd_open", lambda pid: os.open(os.devnull, os.O_RDONLY), raising=False)
+    monkeypatch.setattr(signal, "pidfd_send_signal", lambda fd, sig: sent.append(sig), raising=False)
+    with pytest.raises(RuntimeError), s:
+        pass
+    assert sent == [] and d.killed == []
 
 
 def test_exception_in_body_quits_and_propagates(tmp_path):

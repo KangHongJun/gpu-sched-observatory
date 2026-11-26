@@ -4,6 +4,8 @@
 #   stop     우리 pipe 디렉터리로만 quit을 보내고 이 사용자의 nvidia-cuda-mps 프로세스가 없는지 확인
 #   status   우리 pipe 디렉터리 기준 get_server_list와 프로세스 목록
 #   env      클라이언트가 쓸 export 줄 출력 (eval "$(scripts/verify/06_mps.sh env)")
+# gso.bench.mps.MpsSession과 이 스크립트는 같은 /tmp/gso-mps-$UID를 쓰므로 동시에 쓰지 않는다
+#   (start는 MpsSession의 session.lock이 잡혀 있으면 거부한다).
 # 시스템 기본 pipe 디렉터리(/tmp/nvidia-mps)와 GPU compute mode는 건드리지 않는다. sudo 없음.
 set -euo pipefail
 
@@ -41,6 +43,10 @@ case "${1:-}" in
       exit 1
     fi
     prepare_base
+    if [ -e "$BASE/session.lock" ] && ! flock -n "$BASE/session.lock" true; then
+      echo "refuse: a gso MPS session (MpsSession) holds $BASE/session.lock" >&2
+      exit 1
+    fi
     # 데몬은 GPU 1만 볼 수 있다.
     CUDA_VISIBLE_DEVICES=1 CUDA_MPS_PIPE_DIRECTORY="$PIPE" CUDA_MPS_LOG_DIRECTORY="$LOG" "$CTL" -d
     sleep 1
